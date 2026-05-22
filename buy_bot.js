@@ -50,7 +50,7 @@ function getPaymentLabel(paymentType) {
     const labels = {
         '1': 'Bank',
         '2': 'Wallet',
-        '14': 'OPay',
+        '14': 'Bank',
         '470': 'PalmPay',
         '520': 'OPay',
         '1001': 'Kuda',
@@ -170,27 +170,58 @@ async function sendTelegramPaymentInfo(orderId, amount, sellerBank, paymentType)
 
 *📌 Payment Method:* ${paymentMethodName}`;
 
+    // Show bank name if available
     if (sellerBank.bankName && sellerBank.bankName !== 'N/A' && sellerBank.bankName !== '') {
         message += `\n*🏦 Bank Name:* ${sellerBank.bankName}`;
     }
 
-    message += `\n*🔢 ${paymentLabel} Number:* \`${sellerBank.accountNumber}\``;
-    message += `\n*👤 Account Name:* ${sellerBank.accountName}`;
-    message += `\n\n⚠️ Send payment to the ${paymentLabel} number above.`;
+    // Show account number if available, otherwise indicate it's missing
+    if (sellerBank.accountNumber && sellerBank.accountNumber !== 'N/A' && sellerBank.accountNumber !== '') {
+        message += `\n*🔢 ${paymentLabel} Number:* \`${sellerBank.accountNumber}\``;
+    } else {
+        message += `\n*🔢 ${paymentLabel} Number:* \`Not available via API - please check Bybit app\``;
+    }
 
-    const copyButton = {
-        reply_markup: {
-            inline_keyboard: [
-                [
-                    {
-                        text: `📋 Copy ${paymentLabel} Number`,
-                        copy_text: { text: sellerBank.accountNumber }
-                    }
+    // Show account name if available
+    if (sellerBank.accountName && sellerBank.accountName !== 'N/A' && sellerBank.accountName !== '') {
+        message += `\n*👤 Account Name:* ${sellerBank.accountName}`;
+    }
+
+    message += `\n\n⚠️ Send payment to the ${paymentLabel} account above.`;
+
+    // Copy button - only add if account number exists
+    let copyButton = {};
+    if (sellerBank.accountNumber && sellerBank.accountNumber !== 'N/A' && sellerBank.accountNumber !== '') {
+        copyButton = {
+            reply_markup: {
+                inline_keyboard: [
+                    [
+                        {
+                            text: `📋 Copy ${paymentLabel} Number`,
+                            copy_text: { text: sellerBank.accountNumber }
+                        }
+                    ]
                 ]
-            ]
-        }
-    };
+            }
+        };
+    }
 
+    const sentMessage = await telegramBot.telegram.sendMessage(TELEGRAM_CHAT_ID, message, {
+        parse_mode: 'Markdown',
+        ...copyButton
+    });
+    
+    console.log(`[${new Date().toLocaleString()}] 📱 Payment details sent for order ${orderId}`);
+    
+    setTimeout(async () => {
+        try {
+            await telegramBot.telegram.deleteMessage(TELEGRAM_CHAT_ID, sentMessage.message_id);
+            console.log(`[${new Date().toLocaleString()}] 🗑️ Auto-deleted payment message for order ${orderId}`);
+        } catch (deleteError) {
+            console.error(`[${new Date().toLocaleString()}] ❌ Failed to delete payment message: ${deleteError.message}`);
+        }
+    }, 10 * 60 * 1000);
+}
     const sentMessage = await telegramBot.telegram.sendMessage(TELEGRAM_CHAT_ID, message, {
         parse_mode: 'Markdown',
         ...copyButton
@@ -509,6 +540,7 @@ async function resumeMonitoringForActiveOrders() {
 }
 
 // ============ PROCESS NEW ORDER ============
+// ============ PROCESS NEW ORDER ============
 async function processNewOrder(order) {
     const orderId = order.id;
     
@@ -529,12 +561,17 @@ async function processNewOrder(order) {
     if (success) {
         const sellerBank = await getSellersSelectedPaymentMethod(orderId);
         
-        if (sellerBank && sellerBank.accountNumber && sellerBank.accountNumber !== 'N/A') {
+        // Check if we have ANY payment information (bank name OR account number OR account name)
+        const hasBankName = sellerBank && sellerBank.bankName && sellerBank.bankName !== 'N/A';
+        const hasAccountNumber = sellerBank && sellerBank.accountNumber && sellerBank.accountNumber !== 'N/A';
+        const hasAccountName = sellerBank && sellerBank.accountName && sellerBank.accountName !== 'N/A';
+        
+        if (sellerBank && (hasBankName || hasAccountNumber || hasAccountName)) {
             await sendTelegramPaymentInfo(orderId, order.amount, sellerBank, sellerBank.paymentType);
             console.log(`[${new Date().toLocaleString()}] 📱 Payment details sent to Telegram for order ${orderId}`);
         } else {
             await sendFallbackMessage(orderId, order.amount, order.targetNickName);
-            console.log(`[${new Date().toLocaleString()}] 📱 Fallback message sent for order ${orderId} (no bank details)`);
+            console.log(`[${new Date().toLocaleString()}] 📱 Fallback message sent for order ${orderId} (no payment details)`);
         }
         
         const monitorTask = monitorOrderUntilRelease(orderId, order.amount);
@@ -544,7 +581,6 @@ async function processNewOrder(order) {
         processedOrders.delete(orderId);
     }
 }
-
 // ============ MAIN CHECK LOOP ============
 async function checkPendingOrders() {
     try {
