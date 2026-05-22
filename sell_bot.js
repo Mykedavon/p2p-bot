@@ -20,190 +20,34 @@ const client = new P2P({
 const telegramBot = new Telegraf(TELEGRAM_TOKEN);
 
 // Track orders being processed
-const processedOrders = new Set();
-const monitoringTasks = new Map();
+const activeOrders = new Map(); // orderId -> { reminderInterval, type }
 
-// ============ GET ACTIVE SELL ORDERS (status 10 - waiting for payment) ============
-
-async function getActiveSellOrders() {
-    try {
-        const response = await withRetry(async () => {
-            return await client.getPendingOrders({ page: 1, size: 30 });
-        });
-        
-        const allOrders = response.result?.items || [];
-        
-        const activeSellOrders = allOrders.filter(order => 
-            order.side === 1 && order.status === 10
-        );
-        
-        if (activeSellOrders.length > 0) {
-            console.log(`[${new Date().toLocaleString()}] 📊 Found ${activeSellOrders.length} pending sell order(s) needing payment (status 10)`);
-        }
-        
-        return activeSellOrders;
-    } catch (error) {
-        if (error.message.includes('40001')) {
-            return [];
-        }
-        console.error(`[${new Date().toLocaleString()}] ⚠️ API error: ${error.message}`);
-        return [];
-    }
-}
-
-// ============ GET ORDERS WAITING FOR RELEASE (status 20) ============
-
-async function getWaitingForReleaseOrders() {
-    try {
-        const response = await withRetry(async () => {
-            return await client.getPendingOrders({ page: 1, size: 30 });
-        });
-        
-        const allOrders = response.result?.items || [];
-        
-        const waitingForRelease = allOrders.filter(order => 
-            order.side === 1 && order.status === 20
-        );
-        
-        if (waitingForRelease.length > 0) {
-            console.log(`[${new Date().toLocaleString()}] 📊 Found ${waitingForRelease.length} order(s) waiting for release (status 20)`);
-        }
-        
-        return waitingForRelease;
-    } catch (error) {
-        if (error.message.includes('40001')) {
-            return [];
-        }
-        console.error(`[${new Date().toLocaleString()}] ⚠️ API error: ${error.message}`);
-        return [];
-    }
-}
-
-// ============ ORDER MONITORING FOR RELEASE (NON-BLOCKING) ============
-
-async function monitorOrderUntilRelease(orderId, buyerName) {
-    let reminderCount = 0;
-    let lastReminderTime = 0;
-    const REMINDER_INTERVAL = 5 * 60 * 1000; // 5 minutes between reminders
-    
-    console.log(`[${new Date().toLocaleString()}] 🔍 Monitoring order ${orderId} for release (checking every 10s)`);
-    
-    while (true) {
-        await new Promise(resolve => setTimeout(resolve, 10000)); // Check every 10 seconds
-        
+// ============ RETRY HELPER ============
+async function withRetry(fn, maxRetries = 3, delay = 2000) {
+    let lastError;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
-            const currentOrder = await getOrderDetails(orderId);
-            const status = currentOrder.status || currentOrder.orderStatus;
-            
-            if (status === 50 || status === 'Completed' || status === 'Finished' || status === 'Released') {
-                console.log(`[${new Date().toLocaleString()}] 🎉 Order ${orderId} completed! Coins released.`);
-                await sendChatMessage(orderId, "✅ Coins released!\n\n⭐ Please leave a good review! Your rating helps me serve you better.");
-                await sendTelegramCompletion(orderId);
-                monitoringTasks.delete(orderId);
-                processedOrders.delete(orderId);
-                break;
-            } 
-            else if (status === 20 || status === 'Paid') {
-                const now = Date.now();
-                // Send reminder every 5 minutes
-                if (now - lastReminderTime >= REMINDER_INTERVAL) {
-                    lastReminderTime = now;
-                    reminderCount++;
-                    const reminderMsg = `Reminder #${reminderCount}: Payment has been sent. Please release the coins. Thank you!`;
-                    await sendChatMessage(orderId, reminderMsg);
-                    console.log(`[${new Date().toLocaleString()}] 💬 Reminder #${reminderCount} sent for order ${orderId}`);
-                }
-            }
+            return await fn();
         } catch (error) {
-            console.error(`[${new Date().toLocaleString()}] ❌ Monitoring error for ${orderId}: ${error.message}`);
-        }
-    }
-}
-
-// ============ MONITOR FOR BUYER TO MARK AS PAID (NON-BLOCKING) ============
-
-async function monitorForMarkAsPaid(orderId, buyerName) {
-    console.log(`[${new Date().toLocaleString()}] 🔍 Monitoring order ${orderId} for mark as paid (checking every 10s)`);
-    
-    while (true) {
-        await new Promise(resolve => setTimeout(resolve, 10000)); // Check every 10 seconds
-        
-        try {
-            const orderDetails = await getOrderDetails(orderId);
-            const currentStatus = orderDetails.status || orderDetails.orderStatus;
-            
-            if (currentStatus === 20) {
-                console.log(`[${new Date().toLocaleString()}] ✅ Buyer marked order ${orderId} as paid`);
-                await sendChatMessage(orderId, "Payment claimed. Verifying...");
-                // Start release monitoring without awaiting
-                monitorOrderUntilRelease(orderId, buyerName);
-                break;
-            } else if (currentStatus === 50) {
-                console.log(`[${new Date().toLocaleString()}] Order ${orderId} already completed.`);
-                break;
+            lastError = error;
+            const isNetworkError = error.message.includes('ECONNRESET') || 
+                                   error.message.includes('ETIMEDOUT') ||
+                                   error.code === 'ECONNRESET';
+            if (isNetworkError && attempt < maxRetries) {
+                console.log(`[${new Date().toLocaleString()}] ⚠️ Network error (attempt ${attempt}/${maxRetries}), retrying...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                continue;
             }
-        } catch (error) {
-            console.error(`[${new Date().toLocaleString()}] ❌ Status check error for ${orderId}: ${error.message}`);
+            throw error;
         }
     }
-}
-
-// ============ PROCESS NEW SELL ORDER (NON-BLOCKING) ============
-
-async function processNewOrder(order) {
-    const orderId = order.id;
-    
-    if (processedOrders.has(orderId) || monitoringTasks.has(orderId)) {
-        return;
-    }
-    
-    processedOrders.add(orderId);
-    
-    console.log(`[${new Date().toLocaleString()}] 📦 New sell order: ${orderId} | Buyer: ${order.targetNickName} | Amount: ${order.amount} USDT`);
-    
-    // Wait 5 seconds
-    await new Promise(resolve => setTimeout(resolve, 5000));
-    
-    // Send initial message
-    await sendChatMessage(orderId, "Hi, I'm online. Please make payment and click MARK AS PAID so I can release the coins.");
-    
-    // Start monitoring for mark as paid (non-blocking - don't await)
-    monitorForMarkAsPaid(orderId, order.targetNickName);
-}
-
-// ============ RESUME MONITORING FOR EXISTING STATUS 20 ORDERS ============
-
-async function resumeMonitoringForWaitingOrders() {
-    console.log(`[${new Date().toLocaleString()}] 🔍 Checking for existing orders waiting for release (status 20)...`);
-    
-    const waitingOrders = await getWaitingForReleaseOrders();
-    
-    if (waitingOrders.length === 0) {
-        console.log(`[${new Date().toLocaleString()}] 📭 No existing orders waiting for release`);
-        return;
-    }
-    
-    console.log(`[${new Date().toLocaleString()}] 📊 Found ${waitingOrders.length} order(s) waiting for release`);
-    
-    for (const order of waitingOrders) {
-        const orderId = order.id;
-        
-        if (monitoringTasks.has(orderId)) {
-            continue;
-        }
-        
-        console.log(`[${new Date().toLocaleString()}] 🔄 Resuming monitoring for order ${orderId} (already paid, waiting for release)`);
-        monitorOrderUntilRelease(orderId, order.targetNickName);
-        processedOrders.add(orderId);
-    }
+    throw lastError;
 }
 
 // ============ BYBIT API ACTIONS ============
-
 async function sendChatMessage(orderId, content) {
     return withRetry(async () => {
         const msgUuid = `${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
-        
         await client.sendChatMessage({ 
             orderId: orderId, 
             message: content,
@@ -228,77 +72,225 @@ async function getOrderDetails(orderId) {
     });
 }
 
-// ============ TELEGRAM FUNCTIONS ============
+// ============ GET ACTIVE SELL ORDERS ============
+async function getActiveSellOrders() {
+    try {
+        const response = await withRetry(async () => {
+            return await client.getPendingOrders({ page: 1, size: 30 });
+        });
+        const allOrders = response.result?.items || [];
+        return allOrders.filter(order => order.side === 1 && order.status === 10);
+    } catch (error) {
+        if (error.message.includes('40001')) return [];
+        console.error(`[${new Date().toLocaleString()}] ⚠️ API error: ${error.message}`);
+        return [];
+    }
+}
 
+// ============ START PAYMENT REMINDERS (status 10 - unpaid) ============
+async function startPaymentReminders(orderId, buyerName, amount) {
+    console.log(`[${new Date().toLocaleString()}] ⏰ Starting payment reminders for order ${orderId} (every 5 minutes)`);
+    
+    const reminderInterval = setInterval(async () => {
+        // Check if order is still active (status 10)
+        const orderDetails = await getOrderDetails(orderId);
+        const currentStatus = orderDetails.status || orderDetails.orderStatus;
+        
+        // If order is no longer status 10, stop reminders
+        if (currentStatus !== 10) {
+            console.log(`[${new Date().toLocaleString()}] 🛑 Stopping payment reminders for order ${orderId} (status changed to ${currentStatus})`);
+            clearInterval(reminderInterval);
+            activeOrders.delete(orderId);
+            return;
+        }
+        
+        // Send payment reminder to buyer
+        const reminderMsg = "Kindly make payment fast and mark as paid to receive your coins.";
+        await sendChatMessage(orderId, reminderMsg);
+        console.log(`[${new Date().toLocaleString()}] 💬 Payment reminder sent for order ${orderId}`);
+        
+    }, 5 * 60 * 1000); // Every 5 minutes
+    
+    activeOrders.set(orderId, { reminderInterval, type: 'payment' });
+}
+
+// ============ TELEGRAM NOTIFICATION TO YOU (when buyer marks as paid) ============
+async function sendTelegramPaymentClaim(orderId, buyerName, amount) {
+    const message = `
+*💰 PAYMENT CLAIMED - VERIFY MANUALLY*
+
+*Order ID:* \`${orderId}\`
+*Buyer:* ${buyerName}
+*Amount:* ${amount} USDT
+
+⚠️ Please check your bank/PalmPay app to verify payment.
+If payment is confirmed, release coins on Bybit app.
+
+P2P → Orders → Pending → Click "RELEASE"
+`;
+    const sentMessage = await telegramBot.telegram.sendMessage(TELEGRAM_CHAT_ID, message, {
+        parse_mode: 'Markdown'
+    });
+    
+    console.log(`[${new Date().toLocaleString()}] 📱 Payment claim notification sent to you for order ${orderId}`);
+    
+    // Auto-delete this notification after 5 minutes
+    setTimeout(async () => {
+        try {
+            await telegramBot.telegram.deleteMessage(TELEGRAM_CHAT_ID, sentMessage.message_id);
+            console.log(`[${new Date().toLocaleString()}] 🗑️ Auto-deleted payment claim notification for order ${orderId}`);
+        } catch (deleteError) {
+            console.error(`[${new Date().toLocaleString()}] ❌ Failed to delete payment claim notification: ${deleteError.message}`);
+        }
+    }, 5 * 60 * 1000);
+}
+
+// ============ TELEGRAM COMPLETION MESSAGE (deletes after 2 minutes) ============
 async function sendTelegramCompletion(orderId) {
     try {
         const message = `✅ Order ${orderId} completed`;
         const sentMessage = await telegramBot.telegram.sendMessage(TELEGRAM_CHAT_ID, message);
         console.log(`[${new Date().toLocaleString()}] 📱 Telegram completion sent for order ${orderId}`);
         
+        // Auto-delete after 2 MINUTES
         setTimeout(async () => {
             try {
                 await telegramBot.telegram.deleteMessage(TELEGRAM_CHAT_ID, sentMessage.message_id);
                 console.log(`[${new Date().toLocaleString()}] 🗑️ Deleted completion message for order ${orderId}`);
             } catch (deleteError) {
-                console.error(`[${new Date().toLocaleString()}] ❌ Failed to delete message: ${deleteError.message}`);
+                console.error(`[${new Date().toLocaleString()}] ❌ Failed to delete completion message: ${deleteError.message}`);
             }
-        }, 5 * 60 * 1000);
+        }, 2 * 60 * 1000); // 2 minutes
     } catch (error) {
         console.error(`[${new Date().toLocaleString()}] ❌ Failed to send Telegram completion: ${error.message}`);
     }
 }
 
-// ============ RETRY HELPER ============
-
-async function withRetry(fn, maxRetries = 3, delay = 2000) {
-    let lastError;
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+// ============ MONITOR FOR BUYER TO MARK AS PAID ============
+async function monitorForMarkAsPaid(orderId, buyerName, amount) {
+    console.log(`[${new Date().toLocaleString()}] 🔍 Monitoring order ${orderId} for mark as paid`);
+    
+    while (true) {
+        await new Promise(resolve => setTimeout(resolve, 10000)); // Check every 10 seconds
+        
         try {
-            return await fn();
-        } catch (error) {
-            lastError = error;
-            const isNetworkError = error.message.includes('ECONNRESET') || 
-                                   error.message.includes('ETIMEDOUT') ||
-                                   error.code === 'ECONNRESET';
-            if (isNetworkError && attempt < maxRetries) {
-                console.log(`[${new Date().toLocaleString()}] ⚠️ Network error (attempt ${attempt}/${maxRetries}), retrying...`);
-                await new Promise(resolve => setTimeout(resolve, delay));
-                continue;
+            const orderDetails = await getOrderDetails(orderId);
+            const currentStatus = orderDetails.status || orderDetails.orderStatus;
+            
+            if (currentStatus === 20) {
+                console.log(`[${new Date().toLocaleString()}] ✅ Buyer marked order ${orderId} as paid`);
+                
+                // Stop payment reminders
+                if (activeOrders.has(orderId)) {
+                    clearInterval(activeOrders.get(orderId).reminderInterval);
+                    activeOrders.delete(orderId);
+                }
+                
+                // Send ONE verification message to buyer (NO reminders after this)
+                await sendChatMessage(orderId, "Payment claimed. Verifying...");
+                
+                // Send Telegram notification to YOU
+                await sendTelegramPaymentClaim(orderId, buyerName, amount);
+                
+                // NO reminders after mark as paid - YOU verify manually
+                // Start monitoring for completion (when YOU release coins)
+                monitorForCompletion(orderId, buyerName, amount);
+                break;
             }
-            throw error;
+        } catch (error) {
+            console.error(`[${new Date().toLocaleString()}] ❌ Status check error for ${orderId}: ${error.message}`);
         }
     }
-    throw lastError;
+}
+
+// ============ MONITOR FOR COMPLETION (when YOU release coins) ============
+async function monitorForCompletion(orderId, buyerName, amount) {
+    console.log(`[${new Date().toLocaleString()}] 🔍 Monitoring order ${orderId} for completion (you releasing coins)`);
+    
+    while (true) {
+        await new Promise(resolve => setTimeout(resolve, 10000)); // Check every 10 seconds
+        
+        try {
+            const orderDetails = await getOrderDetails(orderId);
+            const currentStatus = orderDetails.status || orderDetails.orderStatus;
+            
+            if (currentStatus === 50 || currentStatus === 'Completed' || currentStatus === 'Finished') {
+                console.log(`[${new Date().toLocaleString()}] 🎉 Order ${orderId} completed! Coins released.`);
+                
+                // Send review request to buyer
+                await sendChatMessage(orderId, "✅ Coins released!\n\n⭐ Please leave a good review! Your rating helps me serve you better.");
+                
+                // Send Telegram completion notification to YOU
+                await sendTelegramCompletion(orderId);
+                break;
+            }
+        } catch (error) {
+            console.error(`[${new Date().toLocaleString()}] ❌ Completion check error for ${orderId}: ${error.message}`);
+        }
+    }
+}
+
+// ============ PROCESS NEW SELL ORDER ============
+async function processNewOrder(order) {
+    const orderId = order.id;
+    const buyerName = order.targetNickName;
+    const amount = order.amount;
+    
+    if (activeOrders.has(orderId)) {
+        return;
+    }
+    
+    console.log(`[${new Date().toLocaleString()}] 📦 New sell order: ${orderId} | Buyer: ${buyerName} | Amount: ${amount} USDT`);
+    
+    // Send initial message (NO payment details, just "I'm online")
+    await sendChatMessage(orderId, "Hi, I'm online. Please make payment and click MARK AS PAID so I can release the coins.");
+    
+    // Start payment reminders (every 5 minutes until paid)
+    await startPaymentReminders(orderId, buyerName, amount);
+    
+    // Start monitoring for mark as paid
+    monitorForMarkAsPaid(orderId, buyerName, amount);
+}
+
+// ============ RESUME EXISTING ORDERS ON STARTUP ============
+async function resumeExistingOrders() {
+    console.log(`[${new Date().toLocaleString()}] 🔍 Checking for existing active orders...`);
+    
+    const response = await withRetry(async () => {
+        return await client.getPendingOrders({ page: 1, size: 50 });
+    });
+    const allOrders = response.result?.items || [];
+    
+    // Status 10 orders - need payment reminders
+    const unpaidOrders = allOrders.filter(order => order.side === 1 && order.status === 10);
+    // Status 20 orders - already marked as paid, waiting for you to release
+    const paidOrders = allOrders.filter(order => order.side === 1 && order.status === 20);
+    
+    for (const order of unpaidOrders) {
+        if (!activeOrders.has(order.id)) {
+            console.log(`[${new Date().toLocaleString()}] 🔄 Resuming reminders for unpaid order ${order.id}`);
+            await startPaymentReminders(order.id, order.targetNickName, order.amount);
+            monitorForMarkAsPaid(order.id, order.targetNickName, order.amount);
+        }
+    }
+    
+    for (const order of paidOrders) {
+        console.log(`[${new Date().toLocaleString()}] 📌 Order ${order.id} is already marked as paid - awaiting your manual release`);
+        await sendTelegramPaymentClaim(order.id, order.targetNickName, order.amount);
+        // Start monitoring for completion (when you release coins)
+        monitorForCompletion(order.id, order.targetNickName, order.amount);
+    }
 }
 
 // ============ MAIN CHECK LOOP ============
-
 async function checkSellOrders() {
     try {
-        // Check for new status 10 orders
         const orders = await getActiveSellOrders();
-        
         for (const order of orders) {
-            const orderId = order.id;
-            if (!processedOrders.has(orderId) && !monitoringTasks.has(orderId)) {
-                // Don't await - let each order process in parallel
-                processNewOrder(order);
+            if (!activeOrders.has(order.id)) {
+                await processNewOrder(order);
             }
         }
-        
-        // Check for status 20 orders that need release monitoring
-        const waitingOrders = await getWaitingForReleaseOrders();
-        
-        for (const order of waitingOrders) {
-            const orderId = order.id;
-            if (!monitoringTasks.has(orderId)) {
-                console.log(`[${new Date().toLocaleString()}] 🔄 New status 20 order detected: ${orderId}`);
-                monitorOrderUntilRelease(orderId, order.targetNickName);
-                processedOrders.add(orderId);
-            }
-        }
-        
     } catch (error) {
         if (!error.message.includes('ECONNRESET')) {
             console.error(`[${new Date().toLocaleString()}] ❌ Check error: ${error.message}`);
@@ -307,10 +299,9 @@ async function checkSellOrders() {
 }
 
 // ============ STARTUP ============
-
 async function sendStartupMessage() {
     try {
-        await telegramBot.telegram.sendMessage(TELEGRAM_CHAT_ID, '🤖 *P2P SELL Bot is Online!*\n\n✅ Monitoring for new SELL orders\n✅ Parallel processing for multiple orders\n✅ Sends Telegram notification when order completes', {
+        await telegramBot.telegram.sendMessage(TELEGRAM_CHAT_ID, '🤖 *P2P SELL Bot is Online!*\n\n✅ Payment reminders every 5 minutes: "Kindly make payment fast"\n✅ Alerts you when buyer marks as paid\n✅ YOU verify payment and release coins manually\n✅ Completion message deletes after 2 minutes', {
             parse_mode: 'Markdown'
         });
         console.log('📱 Telegram connected');
@@ -320,31 +311,29 @@ async function sendStartupMessage() {
 }
 
 // ============ MAIN ============
-
 async function main() {
     console.log(`
     ╔══════════════════════════════════════════════════╗
-    ║     Bybit P2P SELL Bot - PARALLEL PROCESSING    ║
-    ║     Handles multiple orders simultaneously      ║
+    ║     Bybit P2P SELL Bot - COMPLETE FIXED         ║
+    ║     NO buy bot reminders, NO spam after paid    ║
     ╚══════════════════════════════════════════════════╝
     `);
     console.log('============================================================');
     console.log('🤖 BYBIT P2P SELL BOT');
     console.log('============================================================');
     console.log(`📱 Telegram: Connected`);
-    console.log(`📊 Status 10: New orders (awaiting payment)`);
-    console.log(`📊 Status 20: Orders waiting for release`);
-    console.log(`🔄 PARALLEL PROCESSING: Multiple orders handled simultaneously`);
-    console.log(`⏰ Checks every 10 seconds, reminders every 5 minutes`);
-    console.log(`📱 Telegram notification when order completes (deletes after 5min)`);
+    console.log(`📊 Status 10: New orders → Payment reminders every 5 minutes`);
+    console.log(`📊 Status 20: Buyer marks as paid → Alert YOU, NO reminders to buyer`);
+    console.log(`👆 YOU: Verify payment manually, then release coins on Bybit app`);
+    console.log(`🗑️ Completion message auto-deletes after 2 minutes`);
     console.log('------------------------------------------------------------');
     
     await sendStartupMessage();
     
     telegramBot.launch().catch(err => console.error('Telegram launch error:', err));
     
-    // Resume monitoring for existing orders waiting for release
-    await resumeMonitoringForWaitingOrders();
+    // Resume monitoring existing orders
+    await resumeExistingOrders();
     
     // Main loop
     while (true) {
@@ -353,7 +342,6 @@ async function main() {
     }
 }
 
-// Graceful shutdown
 process.once('SIGINT', () => {
     console.log('\n🛑 Bot shutting down...');
     telegramBot.stop('SIGINT');
@@ -366,5 +354,4 @@ process.once('SIGTERM', () => {
     process.exit(0);
 });
 
-// ============ RUN ============
 main().catch(console.error);
