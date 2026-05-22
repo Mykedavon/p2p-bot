@@ -35,7 +35,7 @@ function getPaymentMethodName(paymentType) {
     const paymentTypes = {
         '1': '🏦 Bank Transfer',
         '2': '📱 Digital Wallet',
-        '14': '📱 OPay',
+        '14': '🏦 Bank Transfer',
         '470': '📱 PalmPay',
         '520': '📱 OPay',
         '1001': '📱 Kuda Bank',
