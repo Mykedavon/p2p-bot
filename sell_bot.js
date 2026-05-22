@@ -3,8 +3,8 @@ const { Telegraf } = require('telegraf');
 require('dotenv').config();
 
 // ============ CONFIGURATION ============
-const API_KEY = process.env.API_KEY_SELL;
-const API_SECRET = process.env.API_SECRET_SELL;
+const API_KEY = process.env.API_KEY;
+const API_SECRET = process.env.API_SECRET;
 const TELEGRAM_TOKEN = process.env.TELEGRAM_SELL_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
