@@ -23,8 +23,15 @@ console.log('[Manager] Starting Sell Bot...');
 // Start buy_bot.js
 const buyBot = spawn('node', ['buy_bot.js'], { stdio: 'inherit' });
 
-// Start sell_bot.js
-const sellBot = spawn('node', ['sell_bot.js'], { stdio: 'inherit' });
+// Wait 10 seconds, then start sell_bot.js
+setTimeout(() => {
+    console.log('[Manager] Starting Sell Bot...');
+    const sellBot = spawn('node', ['sell_bot.js'], { stdio: 'inherit' });
+    
+    sellBot.on('exit', (code) => {
+        console.log(`[Manager] Sell Bot exited with code ${code}`);
+    });
+}, 10000); // 10 second delay
 
 // Handle buy bot exit
 buyBot.on('exit', (code) => {
