@@ -2,6 +2,17 @@ const { P2P } = require('bybit-p2p-sdk');
 const { Telegraf } = require('telegraf');
 require('dotenv').config();
 
+// Track processed orders
+const processedOrders = new Set();
+const monitoringTasks = new Map();
+
+// Per-order rate limit tracking (each order has its own timer)
+const lastReminderTimeMap = new Map();
+const MIN_REMINDER_INTERVAL = 5000;
+
+// Track reminder state for each order (new reminder logic)
+const reminderStateMap = new Map(); // orderId -> { reminderCount, reminderPhase, lastReminderTime, markAsPaidTime }
+
 // ============ CONFIGURATION ============
 const API_KEY = process.env.API_KEY;
 const API_SECRET = process.env.API_SECRET;
@@ -415,52 +426,69 @@ async function getAllActiveOrders() {
     }
 }
 
-// ============ ORDER MONITORING (PER-ORDER RATE LIMIT) ============
+// ============ ORDER MONITORING (UPDATED REMINDER LOGIC) ============
 async function monitorOrderUntilRelease(orderId, amount) {
-    let reminderCount = 0;
+    // Initialize reminder state for this order
+    reminderStateMap.set(orderId, {
+        reminderCount: 0,
+        reminderPhase: 'waiting', // waiting, active, completed
+        lastReminderTime: 0,
+        markAsPaidTime: Date.now() // Record when mark as paid happened
+    });
     
-    if (!lastReminderTimeMap.has(orderId)) {
-        lastReminderTimeMap.set(orderId, 0);
-    }
-    
-    console.log(`[${new Date().toLocaleString()}] 🔍 Monitoring order ${orderId} (every 20s)`);
+    console.log(`[${new Date().toLocaleString()}] 🔍 Monitoring order ${orderId} (checking every 10s)`);
     
     while (true) {
-        await new Promise(resolve => setTimeout(resolve, 10000));
-        reminderCount++;
+        await new Promise(resolve => setTimeout(resolve, 10000)); // Check every 10 seconds
         
         try {
             const currentOrder = await getOrderDetails(orderId);
             const status = currentOrder.status || currentOrder.orderStatus;
+            const state = reminderStateMap.get(orderId);
             
+            // If order is completed (status 50), stop monitoring
             if (status === 50 || status === 'Completed' || status === 'Finished' || status === 'Released') {
                 console.log(`[${new Date().toLocaleString()}] 🎉 Order ${orderId} completed! Coins released.`);
                 await sendTelegramCompletion(orderId);
                 monitoringTasks.delete(orderId);
                 processedOrders.delete(orderId);
-                lastReminderTimeMap.delete(orderId);
+                reminderStateMap.delete(orderId);
                 break;
             } 
             else if (status === 20 || status === 'Paid') {
-                await new Promise(resolve => setTimeout(resolve, 180000));
                 const now = Date.now();
-                const lastTimeForThisOrder = lastReminderTimeMap.get(orderId) || 0;
-                const timeSinceLastReminder = now - lastTimeForThisOrder;
+                const timeSinceMarkAsPaid = now - state.markAsPaidTime;
+                const fiveMinutesInMs = 5 * 60 * 1000; // 5 minutes
+                const oneMinuteInMs = 1 * 60 * 1000; // 1 minute
                 
-                if (timeSinceLastReminder < MIN_REMINDER_INTERVAL) {
-                    const waitTime = MIN_REMINDER_INTERVAL - timeSinceLastReminder;
-                    console.log(`[${new Date().toLocaleString()}] ⏳ Order ${orderId}: Waiting ${waitTime}ms before reminder #${reminderCount}`);
-                    await new Promise(resolve => setTimeout(resolve, waitTime));
+                // PHASE 1: Wait 5 minutes before sending first reminder
+                if (state.reminderPhase === 'waiting' && timeSinceMarkAsPaid >= fiveMinutesInMs) {
+                    // First reminder after 5 minutes
+                    state.reminderPhase = 'active';
+                    state.reminderCount = 1;
+                    state.lastReminderTime = now;
+                    
+                    const reminderMsg = `Reminder #1: Payment has been confirmed. Please release the coins. Thank you!`;
+                    await sendChatMessage(orderId, reminderMsg);
+                    console.log(`[${new Date().toLocaleString()}] 💬 First reminder sent for order ${orderId} (after 5 min wait)`);
                 }
-                
-                const reminderMsg = `Reminder #${reminderCount}: Payment has been sent. Please release the coins. Thank you!`;
-                const success = await sendChatMessage(orderId, reminderMsg);
-                
-                if (success) {
-                    lastReminderTimeMap.set(orderId, Date.now());
-                    console.log(`[${new Date().toLocaleString()}] 💬 Order ${orderId}: Reminder #${reminderCount} sent`);
-                } else {
-                    console.log(`[${new Date().toLocaleString()}] ⚠️ Order ${orderId}: Reminder #${reminderCount} failed`);
+                // PHASE 2: Send reminders every minute for 5 minutes (total 5 reminders)
+                else if (state.reminderPhase === 'active' && state.reminderCount < 5) {
+                    const timeSinceLastReminder = now - state.lastReminderTime;
+                    
+                    if (timeSinceLastReminder >= oneMinuteInMs) {
+                        state.reminderCount++;
+                        state.lastReminderTime = now;
+                        
+                        const reminderMsg = `Reminder #${state.reminderCount}: Payment has been confirmed. Please release the coins. Thank you!`;
+                        await sendChatMessage(orderId, reminderMsg);
+                        console.log(`[${new Date().toLocaleString()}] 💬 Reminder #${state.reminderCount} sent for order ${orderId}`);
+                    }
+                }
+                // PHASE 3: After 5 reminders, stop sending
+                else if (state.reminderPhase === 'active' && state.reminderCount >= 5) {
+                    state.reminderPhase = 'completed';
+                    console.log(`[${new Date().toLocaleString()}] 🛑 No more reminders for order ${orderId} (5 reminders sent)`);
                 }
             }
         } catch (error) {
@@ -468,7 +496,6 @@ async function monitorOrderUntilRelease(orderId, amount) {
         }
     }
 }
-
 // ============ RESUME MONITORING FOR ACTIVE ORDERS ============
 async function resumeMonitoringForActiveOrders() {
     console.log(`[${new Date().toLocaleString()}] 🔍 Checking for existing active orders...`);
