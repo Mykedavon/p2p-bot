@@ -247,7 +247,7 @@ The transaction is complete. Check your wallet.
         } catch (deleteError) {
             console.error(`[${new Date().toLocaleString()}] ❌ Failed to delete completion message: ${deleteError.message}`);
         }
-    }, 10 * 60 * 1000);
+    }, 5 * 60 * 1000);
 }
 
 // ============ TELEGRAM CALLBACK HANDLER ============
