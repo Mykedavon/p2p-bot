@@ -525,7 +525,7 @@ async function main() {
     console.log('------------------------------------------------------------');
     
     await sendStartupMessage();
-    telegramBot.launch().catch(err => console.error('Telegram launch error:', err));
+    // telegramBot.launch().catch(err => console.error('Telegram launch error:', err));
     await resumeMonitoringForActiveOrders();
     
     while (true) {
