@@ -1,4 +1,4 @@
-// ============ HEALTH CHECK SERVER (keeps both bots alive on Render) ============
+// ============ HEALTH CHECK SERVER ============
 const express = require('express');
 const healthApp = express();
 const PORT = process.env.PORT || 10000;
@@ -11,7 +11,7 @@ healthApp.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Health check server running on port ${PORT}`);
 });
 
-// ============ INDEX.JS - Runs both bots ============
+// ============ RUN BOTH BOTS ============
 const { spawn } = require('child_process');
 
 console.log('[Manager] Starting Buy Bot...');
@@ -19,10 +19,10 @@ console.log('[Manager] Starting Buy Bot...');
 // Start buy_bot.js immediately
 const buyBot = spawn('node', ['buy_bot.js'], { stdio: 'inherit' });
 
-// Declare sellBot variable outside the timeout
+// Declare sellBot variable
 let sellBot;
 
-// Wait 10 seconds, then start sell_bot.js
+// Wait 15 seconds, then start sell_bot.js
 setTimeout(() => {
     console.log('[Manager] Starting Sell Bot...');
     sellBot = spawn('node', ['sell_bot.js'], { stdio: 'inherit' });
@@ -30,14 +30,14 @@ setTimeout(() => {
     sellBot.on('exit', (code) => {
         console.log(`[Manager] Sell Bot exited with code ${code}`);
     });
-}, 10000); // 10 second delay
+}, 15000); // 15 second delay
 
 // Handle buy bot exit
 buyBot.on('exit', (code) => {
     console.log(`[Manager] Buy Bot exited with code ${code}`);
 });
 
-// Handle process termination (check if sellBot exists before killing)
+// Handle process termination
 process.on('SIGINT', () => {
     console.log('\n[Manager] Shutting down...');
     buyBot.kill();
@@ -52,4 +52,4 @@ process.on('SIGTERM', () => {
     process.exit();
 });
 
-console.log('[Manager] Sell bot will start in 10 seconds...');
+console.log('[Manager] Sell bot will start in 15 seconds...');
