@@ -238,6 +238,22 @@ async function sendTelegramPaymentInfo(orderId, amount, sellerBank, paymentType)
         }
     }, 10 * 60 * 1000);
 }
+    const sentMessage = await telegramBot.telegram.sendMessage(TELEGRAM_CHAT_ID, message, {
+        parse_mode: 'Markdown',
+        ...copyButton
+    });
+    
+    console.log(`[${new Date().toLocaleString()}] 📱 Payment details sent for order ${orderId}`);
+    
+    setTimeout(async () => {
+        try {
+            await telegramBot.telegram.deleteMessage(TELEGRAM_CHAT_ID, sentMessage.message_id);
+            console.log(`[${new Date().toLocaleString()}] 🗑️ Auto-deleted payment message for order ${orderId}`);
+        } catch (deleteError) {
+            console.error(`[${new Date().toLocaleString()}] ❌ Failed to delete payment message: ${deleteError.message}`);
+        }
+    }, 10 * 60 * 1000);
+}
 
 async function sendFallbackMessage(orderId, amount, sellerName) {
     const message = `
