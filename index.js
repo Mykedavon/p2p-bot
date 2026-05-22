@@ -30,7 +30,7 @@ setTimeout(() => {
     sellBot.on('exit', (code) => {
         console.log(`[Manager] Sell Bot exited with code ${code}`);
     });
-}, 15000); // 15 second delay
+}, 30000); // 15 second delay
 
 // Handle buy bot exit
 buyBot.on('exit', (code) => {
