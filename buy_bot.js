@@ -534,7 +534,15 @@ async function main() {
     }
 }
 
-process.once('SIGINT', () => { console.log('\n🛑 Bot shutting down...'); telegramBot.stop('SIGINT'); process.exit(0); });
-process.once('SIGTERM', () => { console.log('\n🛑 Bot shutting down...'); telegramBot.stop('SIGTERM'); process.exit(0); });
+// Graceful shutdown
+process.once('SIGINT', () => {
+    console.log('\n🛑 Bot shutting down...');
+    process.exit(0);
+});
+
+process.once('SIGTERM', () => {
+    console.log('\n🛑 Bot shutting down...');
+    process.exit(0);
+});
 
 main().catch(console.error);
