@@ -254,6 +254,9 @@ async function processNewOrder(order) {
 
 // ============ RESUME EXISTING ORDERS ON STARTUP ============
 async function resumeExistingOrders() {
+        // Add 5 second delay before first API call
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    
     console.log(`[${new Date().toLocaleString()}] 🔍 Checking for existing active orders...`);
     
     const response = await withRetry(async () => {
