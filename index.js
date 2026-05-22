@@ -52,4 +52,4 @@ process.on('SIGTERM', () => {
 });
 
 console.log('[Manager] Both bots are running!');
-Add health check server to keep both bots alive
+// Add health check server to keep both bots alive
