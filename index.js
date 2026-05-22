@@ -1,3 +1,19 @@
+// ============ HEALTH CHECK SERVER (keeps both bots alive on Render) ============
+const express = require('express');
+const healthApp = express();
+const PORT = process.env.PORT || 10000;
+
+healthApp.get('/health', (req, res) => {
+    res.status(200).send('Both bots are alive!');
+});
+
+healthApp.listen(PORT, '0.0.0.0', () => {
+    console.log(`✅ Health check server running on port ${PORT}`);
+});
+
+// ============ YOUR EXISTING INDEX.JS CODE BELOW ============
+// (Keep your existing spawn code for buy_bot and sell_bot)
+
 // index.js - Runs both bots simultaneously
 const { spawn } = require('child_process');
 
