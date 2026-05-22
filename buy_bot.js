@@ -2,17 +2,6 @@ const { P2P } = require('bybit-p2p-sdk');
 const { Telegraf } = require('telegraf');
 require('dotenv').config();
 
-// Track processed orders
-const processedOrders = new Set();
-const monitoringTasks = new Map();
-
-// Per-order rate limit tracking (each order has its own timer)
-const lastReminderTimeMap = new Map();
-const MIN_REMINDER_INTERVAL = 5000;
-
-// Track reminder state for each order (new reminder logic)
-const reminderStateMap = new Map(); // orderId -> { reminderCount, reminderPhase, lastReminderTime, markAsPaidTime }
-
 // ============ CONFIGURATION ============
 const API_KEY = process.env.API_KEY;
 const API_SECRET = process.env.API_SECRET;
@@ -38,7 +27,10 @@ const monitoringTasks = new Map();
 const lastReminderTimeMap = new Map();
 const MIN_REMINDER_INTERVAL = 5000;
 
-// ============ HELPER FUNCTIONS (FULLY CORRECTED) ============
+// Track reminder state for each order (new reminder logic)
+const reminderStateMap = new Map(); // orderId -> { reminderCount, reminderPhase, lastReminderTime, markAsPaidTime }
+
+// ============ HELPER FUNCTIONS ============
 function getPaymentMethodName(paymentType) {
     const paymentTypes = {
         '1': '🏦 Bank Transfer',
@@ -91,7 +83,7 @@ async function withRetry(fn, maxRetries = 3, delay = 2000) {
     throw lastError;
 }
 
-// ============ GET SELLER'S SELECTED PAYMENT METHOD (CORRECTED) ============
+// ============ GET SELLER'S SELECTED PAYMENT METHOD ============
 async function getSellersSelectedPaymentMethod(orderId) {
     return withRetry(async () => {
         const orderDetails = await client.getOrderDetails({ orderId: orderId });
@@ -108,7 +100,6 @@ async function getSellersSelectedPaymentMethod(orderId) {
         
         let selectedMethod = null;
         
-        // STRATEGY 1: Try to get from confirmedPayTerm (seller's selected payment method)
         const confirmedPayment = orderResult.confirmedPayTerm;
         
         if (confirmedPayment && confirmedPayment.id) {
@@ -118,23 +109,18 @@ async function getSellersSelectedPaymentMethod(orderId) {
             }
         }
         
-        // STRATEGY 2: If no confirmedPayTerm, find by matching payment method based on order side
-        // For Bank Transfer orders, the paymentTermList may have multiple entries
         if (!selectedMethod) {
-            // Log all available payment methods for debugging
             console.log(`[DEBUG] Available payment methods in termList:`);
             for (const method of paymentTermList) {
                 console.log(`[DEBUG]   - paymentType: ${method.paymentType}, bankName: ${method.bankName || 'N/A'}`);
             }
             
-            // First, try to find Bank Transfer (paymentType = 1)
             selectedMethod = paymentTermList.find(method => method.paymentType === 1);
             if (selectedMethod) {
                 console.log(`[DEBUG] Selected Bank Transfer method (paymentType: 1)`);
             }
         }
         
-        // STRATEGY 3: Look for OPay (paymentType = 520 or 14)
         if (!selectedMethod) {
             selectedMethod = paymentTermList.find(method => method.paymentType === 520 || method.paymentType === 14);
             if (selectedMethod) {
@@ -142,7 +128,6 @@ async function getSellersSelectedPaymentMethod(orderId) {
             }
         }
         
-        // STRATEGY 4: Look for PalmPay (paymentType = 470 or 1003)
         if (!selectedMethod) {
             selectedMethod = paymentTermList.find(method => method.paymentType === 470 || method.paymentType === 1003);
             if (selectedMethod) {
@@ -150,7 +135,6 @@ async function getSellersSelectedPaymentMethod(orderId) {
             }
         }
         
-        // STRATEGY 5: Fallback to first available method
         if (!selectedMethod && paymentTermList.length > 0) {
             selectedMethod = paymentTermList[0];
             console.log(`[DEBUG] Using first available payment method (paymentType: ${selectedMethod.paymentType})`);
@@ -174,8 +158,7 @@ async function getSellersSelectedPaymentMethod(orderId) {
     }, 5, 3000);
 }
 
-// ============ TELEGRAM FUNCTIONS WITH AUTO-DELETE (10 MINUTES) ============
-
+// ============ TELEGRAM FUNCTIONS ============
 async function sendTelegramPaymentInfo(orderId, amount, sellerBank, paymentType) {
     const paymentMethodName = getPaymentMethodName(paymentType);
     const paymentLabel = getPaymentLabel(paymentType);
@@ -208,7 +191,6 @@ async function sendTelegramPaymentInfo(orderId, amount, sellerBank, paymentType)
         }
     };
 
-    // Send message and capture the message object
     const sentMessage = await telegramBot.telegram.sendMessage(TELEGRAM_CHAT_ID, message, {
         parse_mode: 'Markdown',
         ...copyButton
@@ -216,7 +198,6 @@ async function sendTelegramPaymentInfo(orderId, amount, sellerBank, paymentType)
     
     console.log(`[${new Date().toLocaleString()}] 📱 Payment details sent for order ${orderId}`);
     
-    // Auto-delete after 10 minutes (600,000 milliseconds)
     setTimeout(async () => {
         try {
             await telegramBot.telegram.deleteMessage(TELEGRAM_CHAT_ID, sentMessage.message_id);
@@ -244,14 +225,12 @@ P2P → Orders → Pending → Order ID: ${orderId}
 *Status:* ✅ Marked as Paid - Waiting for seller to release
 `;
     
-    // Send message and capture the message object
     const sentMessage = await telegramBot.telegram.sendMessage(TELEGRAM_CHAT_ID, message, {
         parse_mode: 'Markdown'
     });
     
     console.log(`[${new Date().toLocaleString()}] 📱 Fallback message sent for order ${orderId}`);
     
-    // Auto-delete after 10 minutes (600,000 milliseconds)
     setTimeout(async () => {
         try {
             await telegramBot.telegram.deleteMessage(TELEGRAM_CHAT_ID, sentMessage.message_id);
@@ -272,14 +251,12 @@ Status: Seller has released the coins!
 The transaction is complete. Check your wallet.
 `;
     
-    // Send message and capture the message object
     const sentMessage = await telegramBot.telegram.sendMessage(TELEGRAM_CHAT_ID, message, {
         parse_mode: 'Markdown'
     });
     
     console.log(`[${new Date().toLocaleString()}] 📱 Completion message sent for order ${orderId}`);
     
-    // Auto-delete after 10 minutes (600,000 milliseconds)
     setTimeout(async () => {
         try {
             await telegramBot.telegram.deleteMessage(TELEGRAM_CHAT_ID, sentMessage.message_id);
@@ -290,7 +267,7 @@ The transaction is complete. Check your wallet.
     }, 10 * 60 * 1000);
 }
 
-// ============ TELEGRAM CALLBACK HANDLER (UNCHANGED) ============
+// ============ TELEGRAM CALLBACK HANDLER ============
 telegramBot.on('callback_query', async (ctx) => {
     try {
         await ctx.answerCbQuery();
@@ -303,21 +280,19 @@ telegramBot.on('callback_query', async (ctx) => {
     }
 });
 
-// ============ SEND CHAT MESSAGE (WITH REQUIRED msgUuid) ============
+// ============ BYBIT API ACTIONS ============
 async function sendChatMessage(orderId, content) {
     return withRetry(async () => {
-        // Generate a unique ID for this message
-        // Format: timestamp + random string to ensure uniqueness
         const msgUuid = `${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
         
-        const result = await client.sendChatMessage({ 
+        await client.sendChatMessage({ 
             orderId: orderId, 
             message: content,
             contentType: 'text',
-            msgUuid: msgUuid  // ← REQUIRED PARAMETER
+            msgUuid: msgUuid
         });
         
-        console.log(`[${new Date().toLocaleString()}] 💬 Chat sent for order ${orderId} (UUID: ${msgUuid})`);
+        console.log(`[${new Date().toLocaleString()}] 💬 Chat sent for order ${orderId}`);
         return true;
     }).catch(error => {
         console.error(`[${new Date().toLocaleString()}] ❌ Failed to send chat: ${error.message}`);
@@ -428,25 +403,23 @@ async function getAllActiveOrders() {
 
 // ============ ORDER MONITORING (UPDATED REMINDER LOGIC) ============
 async function monitorOrderUntilRelease(orderId, amount) {
-    // Initialize reminder state for this order
     reminderStateMap.set(orderId, {
         reminderCount: 0,
-        reminderPhase: 'waiting', // waiting, active, completed
+        reminderPhase: 'waiting',
         lastReminderTime: 0,
-        markAsPaidTime: Date.now() // Record when mark as paid happened
+        markAsPaidTime: Date.now()
     });
     
     console.log(`[${new Date().toLocaleString()}] 🔍 Monitoring order ${orderId} (checking every 10s)`);
     
     while (true) {
-        await new Promise(resolve => setTimeout(resolve, 10000)); // Check every 10 seconds
+        await new Promise(resolve => setTimeout(resolve, 10000));
         
         try {
             const currentOrder = await getOrderDetails(orderId);
             const status = currentOrder.status || currentOrder.orderStatus;
             const state = reminderStateMap.get(orderId);
             
-            // If order is completed (status 50), stop monitoring
             if (status === 50 || status === 'Completed' || status === 'Finished' || status === 'Released') {
                 console.log(`[${new Date().toLocaleString()}] 🎉 Order ${orderId} completed! Coins released.`);
                 await sendTelegramCompletion(orderId);
@@ -458,12 +431,10 @@ async function monitorOrderUntilRelease(orderId, amount) {
             else if (status === 20 || status === 'Paid') {
                 const now = Date.now();
                 const timeSinceMarkAsPaid = now - state.markAsPaidTime;
-                const fiveMinutesInMs = 5 * 60 * 1000; // 5 minutes
-                const oneMinuteInMs = 1 * 60 * 1000; // 1 minute
+                const fiveMinutesInMs = 5 * 60 * 1000;
+                const oneMinuteInMs = 1 * 60 * 1000;
                 
-                // PHASE 1: Wait 5 minutes before sending first reminder
                 if (state.reminderPhase === 'waiting' && timeSinceMarkAsPaid >= fiveMinutesInMs) {
-                    // First reminder after 5 minutes
                     state.reminderPhase = 'active';
                     state.reminderCount = 1;
                     state.lastReminderTime = now;
@@ -472,7 +443,6 @@ async function monitorOrderUntilRelease(orderId, amount) {
                     await sendChatMessage(orderId, reminderMsg);
                     console.log(`[${new Date().toLocaleString()}] 💬 First reminder sent for order ${orderId} (after 5 min wait)`);
                 }
-                // PHASE 2: Send reminders every minute for 5 minutes (total 5 reminders)
                 else if (state.reminderPhase === 'active' && state.reminderCount < 5) {
                     const timeSinceLastReminder = now - state.lastReminderTime;
                     
@@ -485,7 +455,6 @@ async function monitorOrderUntilRelease(orderId, amount) {
                         console.log(`[${new Date().toLocaleString()}] 💬 Reminder #${state.reminderCount} sent for order ${orderId}`);
                     }
                 }
-                // PHASE 3: After 5 reminders, stop sending
                 else if (state.reminderPhase === 'active' && state.reminderCount >= 5) {
                     state.reminderPhase = 'completed';
                     console.log(`[${new Date().toLocaleString()}] 🛑 No more reminders for order ${orderId} (5 reminders sent)`);
@@ -496,6 +465,7 @@ async function monitorOrderUntilRelease(orderId, amount) {
         }
     }
 }
+
 // ============ RESUME MONITORING FOR ACTIVE ORDERS ============
 async function resumeMonitoringForActiveOrders() {
     console.log(`[${new Date().toLocaleString()}] 🔍 Checking for existing active orders...`);
