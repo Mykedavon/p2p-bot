@@ -61,6 +61,32 @@ function getPaymentLabel(paymentType) {
     return labels[String(paymentType)] || 'Account';
 }
 
+// ============ GET SELLER INFO (RATING & RELEASE TIME) ============
+async function getSellerInfo(orderId, sellerUid) {
+    try {
+        const response = await client.getCounterpartyInfo({
+            originalUid: sellerUid,
+            orderId: orderId
+        });
+        
+        const result = response.result || {};
+        const avgReleaseTime = parseInt(result.averageReleaseTime) || 0;
+        
+        let rating = 'N/A';
+        if (result.goodAppraiseRate && result.goodAppraiseRate !== '0') {
+            rating = `${result.goodAppraiseRate}%`;
+        } else if (result.recentRate) {
+            rating = `${result.recentRate}%`;
+        }
+        
+        console.log(`[DEBUG] Seller - Release Time: ${avgReleaseTime} mins, Rating: ${rating}`);
+        return { avgReleaseTime, rating };
+    } catch (error) {
+        console.log(`[DEBUG] Could not fetch seller info: ${error.message}`);
+        return { avgReleaseTime: 0, rating: 'N/A' };
+    }
+}
+
 // ============ RETRY HELPER ============
 async function withRetry(fn, maxRetries = 3, delay = 2000) {
     let lastError;
@@ -130,15 +156,38 @@ async function getSellersSelectedPaymentMethod(orderId) {
     }, 5, 3000);
 }
 
-// ============ TELEGRAM FUNCTIONS ============
-async function sendTelegramPaymentInfo(orderId, amount, sellerBank, paymentType) {
+// ============ TELEGRAM FUNCTIONS (ALL AUTO-DELETE AFTER 15 MINUTES) ============
+async function sendTelegramMessage(message) {
+    const sentMessage = await telegramBot.telegram.sendMessage(TELEGRAM_CHAT_ID, message, {
+        parse_mode: 'Markdown'
+    });
+    
+    // Auto-delete after 15 minutes
+    setTimeout(async () => {
+        try {
+            await telegramBot.telegram.deleteMessage(TELEGRAM_CHAT_ID, sentMessage.message_id);
+            console.log(`[${new Date().toLocaleString()}] 🗑️ Auto-deleted telegram message`);
+        } catch (deleteError) {
+            console.error(`[${new Date().toLocaleString()}] ❌ Failed to delete message: ${deleteError.message}`);
+        }
+    }, 15 * 60 * 1000);
+    
+    return sentMessage;
+}
+
+async function sendTelegramPaymentInfo(orderId, amount, sellerBank, paymentType, sellerName, sellerRating, avgReleaseTime) {
     const paymentMethodName = getPaymentMethodName(paymentType);
     const paymentLabel = getPaymentLabel(paymentType);
+    
+    const ratingDisplay = (sellerRating && sellerRating !== 'N/A') ? `${sellerRating}⭐` : 'N/A';
     
     let message = `*💰 NEW ORDER - SEND PAYMENT TO SELLER*
 
 *Order ID:* \`${orderId}\`
 *Amount:* ${amount} USDT
+*Seller:* ${sellerName}
+*Rating:* ${ratingDisplay}
+*Avg Release Time:* ${avgReleaseTime} minutes
 
 *📌 Payment Method:* ${paymentMethodName}`;
 
@@ -174,30 +223,20 @@ async function sendTelegramPaymentInfo(orderId, amount, sellerBank, paymentType)
         };
     }
 
-    const sentMessage = await telegramBot.telegram.sendMessage(TELEGRAM_CHAT_ID, message, {
-        parse_mode: 'Markdown',
-        ...copyButton
-    });
-    
-    console.log(`[${new Date().toLocaleString()}] 📱 Payment details sent for order ${orderId}`);
-    
-    setTimeout(async () => {
-        try {
-            await telegramBot.telegram.deleteMessage(TELEGRAM_CHAT_ID, sentMessage.message_id);
-            console.log(`[${new Date().toLocaleString()}] 🗑️ Auto-deleted payment message for order ${orderId}`);
-        } catch (deleteError) {
-            console.error(`[${new Date().toLocaleString()}] ❌ Failed to delete payment message: ${deleteError.message}`);
-        }
-    }, 10 * 60 * 1000);
+    await sendTelegramMessage(message);
 }
 
-async function sendFallbackMessage(orderId, amount, sellerName) {
+async function sendFallbackMessage(orderId, amount, sellerName, sellerRating, avgReleaseTime) {
+    const ratingDisplay = (sellerRating && sellerRating !== 'N/A') ? `${sellerRating}⭐` : 'N/A';
+    
     const message = `
-*💰 ORDER MARKED AS PAID*
+*⚠️ ORDER MARKED AS PAID - MANUAL ACTION REQUIRED*
 
 *Order ID:* \`${orderId}\`
 *Amount:* ${amount} USDT
 *Seller:* ${sellerName}
+*Rating:* ${ratingDisplay}
+*Avg Release Time:* ${avgReleaseTime} minutes
 
 *⚠️ Payment Details Not Available via API*
 
@@ -208,20 +247,7 @@ P2P → Orders → Pending → Order ID: ${orderId}
 *Status:* ✅ Marked as Paid - Waiting for seller to release
 `;
     
-    const sentMessage = await telegramBot.telegram.sendMessage(TELEGRAM_CHAT_ID, message, {
-        parse_mode: 'Markdown'
-    });
-    
-    console.log(`[${new Date().toLocaleString()}] 📱 Fallback message sent for order ${orderId}`);
-    
-    setTimeout(async () => {
-        try {
-            await telegramBot.telegram.deleteMessage(TELEGRAM_CHAT_ID, sentMessage.message_id);
-            console.log(`[${new Date().toLocaleString()}] 🗑️ Auto-deleted fallback message for order ${orderId}`);
-        } catch (deleteError) {
-            console.error(`[${new Date().toLocaleString()}] ❌ Failed to delete fallback message: ${deleteError.message}`);
-        }
-    }, 10 * 60 * 1000);
+    await sendTelegramMessage(message);
 }
 
 async function sendTelegramCompletion(orderId) {
@@ -233,21 +259,7 @@ Status: Seller has released the coins!
 
 The transaction is complete. Check your wallet.
 `;
-    
-    const sentMessage = await telegramBot.telegram.sendMessage(TELEGRAM_CHAT_ID, message, {
-        parse_mode: 'Markdown'
-    });
-    
-    console.log(`[${new Date().toLocaleString()}] 📱 Completion message sent for order ${orderId}`);
-    
-    setTimeout(async () => {
-        try {
-            await telegramBot.telegram.deleteMessage(TELEGRAM_CHAT_ID, sentMessage.message_id);
-            console.log(`[${new Date().toLocaleString()}] 🗑️ Auto-deleted completion message for order ${orderId}`);
-        } catch (deleteError) {
-            console.error(`[${new Date().toLocaleString()}] ❌ Failed to delete completion message: ${deleteError.message}`);
-        }
-    }, 5 * 60 * 1000);
+    await sendTelegramMessage(message);
 }
 
 // ============ TELEGRAM CALLBACK HANDLER ============
@@ -379,6 +391,7 @@ async function monitorOrderUntilRelease(orderId, amount) {
             
             if (status === 50 || status === 'Completed' || status === 'Finished' || status === 'Released') {
                 console.log(`[${new Date().toLocaleString()}] 🎉 Order ${orderId} completed! Coins released.`);
+                await sendChatMessage(orderId, "✅ Coins released!\n\n⭐ Please leave a good review! Your rating helps me serve you better.");
                 await sendTelegramCompletion(orderId);
                 monitoringTasks.delete(orderId);
                 processedOrders.delete(orderId);
@@ -449,14 +462,25 @@ async function resumeMonitoringForActiveOrders() {
 // ============ PROCESS NEW ORDER ============
 async function processNewOrder(order) {
     const orderId = order.id;
+    const sellerUid = order.userId;
+    const sellerName = order.targetNickName;
+    const amount = order.amount;
     
     if (processedOrders.has(orderId) || monitoringTasks.has(orderId)) return;
     processedOrders.add(orderId);
     
-    console.log(`[${new Date().toLocaleString()}] 📦 New order: ${orderId} | Seller: ${order.targetNickName} | Amount: ${order.amount} USDT`);
+    console.log(`[${new Date().toLocaleString()}] 📦 New order: ${orderId} | Seller: ${sellerName} | Amount: ${amount} USDT`);
     
+    // Get seller's rating and release time
+    const { avgReleaseTime, sellerRating } = await getSellerInfo(orderId, sellerUid);
+    
+    // Wait 5 seconds
     await new Promise(resolve => setTimeout(resolve, 5000));
+    
+    // Send initial chat to seller
     await sendChatMessage(orderId, "Hope you've read my terms before placing trade. Please reply 'agree' to confirm. Thanks 🙏.");
+    
+    // Wait 10 seconds
     await new Promise(resolve => setTimeout(resolve, 10000));
     
     const success = await markAsPaid(orderId);
@@ -470,14 +494,14 @@ async function processNewOrder(order) {
         );
         
         if (hasPaymentInfo) {
-            await sendTelegramPaymentInfo(orderId, order.amount, sellerBank, sellerBank.paymentType);
+            await sendTelegramPaymentInfo(orderId, amount, sellerBank, sellerBank.paymentType, sellerName, sellerRating, avgReleaseTime);
             console.log(`[${new Date().toLocaleString()}] 📱 Payment details sent to Telegram for order ${orderId}`);
         } else {
-            await sendFallbackMessage(orderId, order.amount, order.targetNickName);
+            await sendFallbackMessage(orderId, amount, sellerName, sellerRating, avgReleaseTime);
             console.log(`[${new Date().toLocaleString()}] 📱 Fallback message sent for order ${orderId} (no payment details)`);
         }
         
-        monitorOrderUntilRelease(orderId, order.amount);
+        monitorOrderUntilRelease(orderId, amount);
     } else {
         console.log(`[${new Date().toLocaleString()}] ❌ Failed to mark order ${orderId} as paid`);
         processedOrders.delete(orderId);
@@ -503,7 +527,7 @@ async function checkPendingOrders() {
 // ============ STARTUP ============
 async function sendStartupMessage() {
     try {
-        await telegramBot.telegram.sendMessage(TELEGRAM_CHAT_ID, '🤖 *P2P Bot is Online!*', { parse_mode: 'Markdown' });
+        await telegramBot.telegram.sendMessage(TELEGRAM_CHAT_ID, '🤖 *P2P Bot is Online!*\n\n✅ Auto-detects orders\n✅ Shows seller rating & release time\n✅ Auto-deletes messages after 15 mins\n✅ Copy button for account numbers', { parse_mode: 'Markdown' });
         console.log('📱 Telegram connected');
     } catch (error) {
         console.error('⚠️ Telegram connection failed:', error.message);
@@ -513,7 +537,7 @@ async function sendStartupMessage() {
 // ============ MAIN ============
 async function main() {
     console.log(`\n    ╔══════════════════════════════════════════════════╗
-    ║     Bybit P2P Bot - BUY BOT ONLY                  ║
+    ║     Bybit P2P Bot - BUY BOT (WITH SELLER INFO)    ║
     ╚══════════════════════════════════════════════════╝\n`);
     console.log('============================================================');
     console.log('🤖 BYBIT P2P AUTO TRADING BOT');
@@ -522,10 +546,11 @@ async function main() {
     console.log(`⏰ Timings: Wait 5s → Chat → Wait 10s → Mark as paid → Monitor every 10s`);
     console.log(`📊 Status 10: New orders (needs payment)`);
     console.log(`📊 Status 20: Already paid (waiting for release)`);
+    console.log(`⭐ Shows seller rating & average release time`);
+    console.log(`🗑️ All messages auto-delete after 15 minutes`);
     console.log('------------------------------------------------------------');
     
     await sendStartupMessage();
-    // telegramBot.launch().catch(err => console.error('Telegram launch error:', err));
     await resumeMonitoringForActiveOrders();
     
     while (true) {
