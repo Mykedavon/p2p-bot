@@ -55,10 +55,10 @@ function escapeMarkdown(text) {
         .replace(/\!/g, '\\!');
 }
 
-// ============ GET SELLER INFO (FIXED - USES CORRECT SELLER UID) ============
+// ============ GET SELLER INFO (RATING & RELEASE TIME) ============
 async function getSellerInfo(orderId, sellerUid) {
     try {
-        if (!sellerUid || sellerUid === "0") {
+        if (!sellerUid || sellerUid === "0" || sellerUid === process.env.API_UID) {
             console.log(`[DEBUG] Invalid sellerUid provided: ${sellerUid}`);
             return { avgReleaseTime: 0, rating: 'N/A' };
         }
@@ -161,10 +161,14 @@ async function getSellersSelectedPaymentMethod(orderId) {
         
         if (confirmedPayment && confirmedPayment.id) {
             selectedMethod = paymentTermList.find(method => method.id === confirmedPayment.id);
+            if (selectedMethod) {
+                console.log(`[DEBUG] Found payment method via confirmedPayTerm - paymentType: ${selectedMethod.paymentType}`);
+            }
         }
         
         if (!selectedMethod && paymentTermList.length > 0) {
             selectedMethod = paymentTermList[0];
+            console.log(`[DEBUG] Using first available payment method (paymentType: ${selectedMethod.paymentType})`);
         }
         
         if (!selectedMethod) {
@@ -172,6 +176,7 @@ async function getSellersSelectedPaymentMethod(orderId) {
             return null;
         }
         
+        // Extract account number from multiple possible locations
         let extractedAccountNo = selectedMethod.accountNo || 
                                  selectedMethod.cardNo || 
                                  selectedMethod.bankCardNo || 
@@ -192,6 +197,7 @@ async function getSellersSelectedPaymentMethod(orderId) {
         }
         
         console.log(`[DEBUG] FINAL SELECTED - paymentType: ${selectedMethod.paymentType}, bankName: ${selectedMethod.bankName || 'N/A'}, account: ${extractedAccountNo}`);
+        console.log(`[DEBUG] Account name: ${selectedMethod.realName || 'N/A'}`);
         
         return {
             bankName: selectedMethod.bankName || "N/A",
@@ -244,11 +250,31 @@ async function sendTelegramPaymentInfo(orderId, amount, sellerBank, paymentType,
                   `*Avg Release Time:* ${avgReleaseTime} mins\n\n` +
                   `*📌 Payment Method:* ${paymentMethodName}\n` +
                   `*🏦 Bank:* ${safeBankName}\n` +
-                  `*👤 Name:* \`${safeAccountName}\`\n` +
-                  `*🔢 ${paymentLabel} No:* \`${safeAccountNo}\`\n\n` +
-                  `👉 _Tap values inside backticks to auto-copy._`;
+                  `*👤 Account Name:* \`${safeAccountName}\`\n` +
+                  `*🔢 ${paymentLabel} Number:* \`${safeAccountNo}\`\n\n` +
+                  `👉 Tap the number inside the backticks to copy.`;
 
-    return await sendTelegramMessage(message);
+    await sendTelegramMessage(message);
+}
+
+async function sendFallbackMessage(orderId, amount, sellerName) {
+    const safeSellerName = escapeMarkdown(sellerName);
+    const message = `
+*⚠️ ORDER MARKED AS PAID - MANUAL ACTION REQUIRED*
+
+*Order ID:* \`${orderId}\`
+*Amount:* ${amount} USDT
+*Seller:* ${safeSellerName}
+
+*⚠️ Payment Details Not Available via API*
+
+Please check the Bybit app for the seller's payment information.
+
+P2P → Orders → Pending → Order ID: ${orderId}
+
+*Status:* ✅ Marked as Paid - Waiting for seller to release
+`;
+    await sendTelegramMessage(message);
 }
 
 async function sendTelegramCompletion(orderId) {
@@ -263,6 +289,19 @@ The transaction is complete. Check your wallet.
 `;
     await sendTelegramMessage(message);
 }
+
+// ============ TELEGRAM CALLBACK HANDLER ============
+telegramBot.on('callback_query', async (ctx) => {
+    try {
+        await ctx.answerCbQuery();
+        console.log(`[${new Date().toLocaleString()}] 🔘 Copy button clicked`);
+    } catch (error) {
+        console.error(`[${new Date().toLocaleString()}] ❌ Callback error: ${error.message}`);
+        try {
+            await ctx.answerCbQuery('Error occurred');
+        } catch (e) {}
+    }
+});
 
 // ============ BYBIT API ACTIONS ============
 async function sendChatMessage(orderId, content) {
@@ -451,19 +490,24 @@ async function resumeMonitoringForActiveOrders() {
 // ============ PROCESS NEW ORDER ============
 async function processNewOrder(order) {
     const orderId = order.id;
-    // 🔑 CRITICAL FIX: For a BUY order, the seller is the counterparty (peerUid)
-    // The order.userId is YOUR UID (the buyer). The seller's UID is in peerUid or makerUid
-    const sellerUid = order.peerUid || order.makerUid || order.userId;
+    
+    // ✅ CRITICAL: For BUY orders, the seller's UID is targetUserId, NOT userId
+    // userId = YOU (the buyer)
+    // targetUserId = THE SELLER
+    const sellerUid = order.targetUserId || order.makerUserId;
     const sellerName = order.targetNickName;
     const amount = order.amount;
     
+    // Prevent duplicate processing
     if (failedOrders.has(orderId) || processedOrders.has(orderId) || monitoringTasks.has(orderId)) {
+        console.log(`[${new Date().toLocaleString()}] ⏭️ Order ${orderId} already being processed, skipping`);
         return;
     }
     processedOrders.add(orderId);
     
     console.log(`[${new Date().toLocaleString()}] 📦 New order: ${orderId} | Seller: ${sellerName} | Amount: ${amount} USDT`);
     console.log(`[DEBUG] Seller UID for info lookup: ${sellerUid}`);
+    console.log(`[DEBUG] Your UID (buyer) is: ${order.userId}`);
     
     // Get seller's rating and release time (using the CORRECT seller UID)
     const { avgReleaseTime, sellerRating } = await getSellerInfo(orderId, sellerUid);
@@ -472,30 +516,38 @@ async function processNewOrder(order) {
     await sendChatMessage(orderId, "Hope you've read my terms before placing trade. Please reply 'agree' to confirm. Thanks 🙏.");
     await new Promise(resolve => setTimeout(resolve, 10000));
     
-    const success = await markAsPaid(orderId);
-    
-    if (success) {
-        const sellerBank = await getSellersSelectedPaymentMethod(orderId);
-        const hasPaymentInfo = sellerBank && (
-            (sellerBank.bankName && sellerBank.bankName !== 'N/A') ||
-            (sellerBank.accountNumber && sellerBank.accountNumber !== 'N/A') ||
-            (sellerBank.accountName && sellerBank.accountName !== 'N/A')
-        );
-        
-        if (hasPaymentInfo && sellerBank.accountNumber !== 'N/A') {
-            await sendTelegramPaymentInfo(orderId, amount, sellerBank, sellerBank.paymentType, sellerName, sellerRating, avgReleaseTime);
-            console.log(`[${new Date().toLocaleString()}] 📱 Payment details sent to Telegram for order ${orderId}`);
-        } else {
-            await sendTelegramMessage(`⚠️ *MANUAL ACTION REQUIRED*\n\nOrder ID: ${orderId}\nSeller: ${sellerName}\nAmount: ${amount} USDT\n\n❌ Payment details not available via API.\n\nPlease check the Bybit app for the seller's payment information.`);
-            failedOrders.add(orderId);
-        }
-        
-        monitorOrderUntilRelease(orderId, amount);
+    // Check if already marked as paid before calling markAsPaid
+    const currentOrder = await getOrderDetails(orderId);
+    if (currentOrder.status === 20 || currentOrder.status === 'Paid') {
+        console.log(`[${new Date().toLocaleString()}] Order ${orderId} already marked as paid. Skipping markAsPaid.`);
     } else {
-        console.log(`[${new Date().toLocaleString()}] ❌ Failed to mark order ${orderId} as paid`);
-        processedOrders.delete(orderId);
-        failedOrders.add(orderId);
+        const success = await markAsPaid(orderId);
+        if (!success) {
+            console.log(`[${new Date().toLocaleString()}] ❌ Failed to mark order ${orderId} as paid`);
+            processedOrders.delete(orderId);
+            failedOrders.add(orderId);
+            return;
+        }
     }
+    
+    const sellerBank = await getSellersSelectedPaymentMethod(orderId);
+    const hasPaymentInfo = sellerBank && (
+        (sellerBank.bankName && sellerBank.bankName !== 'N/A') ||
+        (sellerBank.accountNumber && sellerBank.accountNumber !== 'N/A') ||
+        (sellerBank.accountName && sellerBank.accountName !== 'N/A')
+    );
+    
+    if (hasPaymentInfo && sellerBank.accountNumber !== 'N/A') {
+        await sendTelegramPaymentInfo(orderId, amount, sellerBank, sellerBank.paymentType, sellerName, sellerRating, avgReleaseTime);
+        console.log(`[${new Date().toLocaleString()}] 📱 Payment details sent to Telegram for order ${orderId}`);
+    } else {
+        await sendFallbackMessage(orderId, amount, sellerName);
+        console.log(`[${new Date().toLocaleString()}] 📱 Fallback message sent for order ${orderId} (no payment details)`);
+        failedOrders.add(orderId);
+        return;
+    }
+    
+    monitorOrderUntilRelease(orderId, amount);
 }
 
 // ============ MAIN CHECK LOOP ============
@@ -503,9 +555,13 @@ async function checkPendingOrders() {
     try {
         const orders = await getActiveBuyOrders();
         for (const order of orders) {
-            if (!processedOrders.has(order.id) && !monitoringTasks.has(order.id) && !failedOrders.has(order.id)) {
-                await processNewOrder(order);
+            const orderId = order.id;
+            // ✅ Skip if already being processed or failed
+            if (processedOrders.has(orderId) || monitoringTasks.has(orderId) || failedOrders.has(orderId)) {
+                console.log(`[${new Date().toLocaleString()}] ⏭️ Skipping already processed order ${orderId}`);
+                continue;
             }
+            await processNewOrder(order);
         }
     } catch (error) {
         if (!error.message.includes('ECONNRESET')) {
@@ -524,7 +580,7 @@ async function sendStartupMessage() {
     }
 }
 
-// ============ GRACEFUL SHUTDOWN (FIXED - NO CRASH) ============
+// ============ GRACEFUL SHUTDOWN (NO CRASH) ============
 let isShuttingDown = false;
 
 async function handleShutdown(signal) {
