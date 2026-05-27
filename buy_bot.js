@@ -30,6 +30,32 @@ const MIN_REMINDER_INTERVAL = 5000;
 // Track reminder state for each order
 const reminderStateMap = new Map();
 
+// ============ GET SELLER INFO (RATING & RELEASE TIME) ============
+async function getSellerInfo(orderId, sellerUid) {
+    try {
+        const response = await client.getCounterpartyInfo({
+            originalUid: sellerUid,
+            orderId: orderId
+        });
+        
+        const result = response.result || {};
+        const avgReleaseTime = parseInt(result.averageReleaseTime) || 0;
+        
+        let rating = 'N/A';
+        if (result.goodAppraiseRate && result.goodAppraiseRate !== '0') {
+            rating = `${result.goodAppraiseRate}%`;
+        } else if (result.recentRate) {
+            rating = `${result.recentRate}%`;
+        }
+        
+        console.log(`[DEBUG] Seller - Release Time: ${avgReleaseTime} mins, Rating: ${rating}`);
+        return { avgReleaseTime, rating };
+    } catch (error) {
+        console.log(`[DEBUG] Could not fetch seller info: ${error.message}`);
+        return { avgReleaseTime: 0, rating: 'N/A' };
+    }
+}
+
 // ============ HELPER FUNCTIONS ============
 function getPaymentMethodName(paymentType) {
     const paymentTypes = {
@@ -59,32 +85,6 @@ function getPaymentLabel(paymentType) {
         '1004': 'Access Bank'
     };
     return labels[String(paymentType)] || 'Account';
-}
-
-// ============ GET SELLER INFO (RATING & RELEASE TIME) ============
-async function getSellerInfo(orderId, sellerUid) {
-    try {
-        const response = await client.getCounterpartyInfo({
-            originalUid: sellerUid,
-            orderId: orderId
-        });
-        
-        const result = response.result || {};
-        const avgReleaseTime = parseInt(result.averageReleaseTime) || 0;
-        
-        let rating = 'N/A';
-        if (result.goodAppraiseRate && result.goodAppraiseRate !== '0') {
-            rating = `${result.goodAppraiseRate}%`;
-        } else if (result.recentRate) {
-            rating = `${result.recentRate}%`;
-        }
-        
-        console.log(`[DEBUG] Seller - Release Time: ${avgReleaseTime} mins, Rating: ${rating}`);
-        return { avgReleaseTime, rating };
-    } catch (error) {
-        console.log(`[DEBUG] Could not fetch seller info: ${error.message}`);
-        return { avgReleaseTime: 0, rating: 'N/A' };
-    }
 }
 
 // ============ RETRY HELPER ============
@@ -156,7 +156,7 @@ async function getSellersSelectedPaymentMethod(orderId) {
     }, 5, 3000);
 }
 
-// ============ TELEGRAM FUNCTIONS (ALL AUTO-DELETE AFTER 15 MINUTES) ============
+// ============ TELEGRAM FUNCTIONS (ALL MESSAGES AUTO-DELETE AFTER 15 MINUTES) ============
 async function sendTelegramMessage(message) {
     const sentMessage = await telegramBot.telegram.sendMessage(TELEGRAM_CHAT_ID, message, {
         parse_mode: 'Markdown'
@@ -391,7 +391,6 @@ async function monitorOrderUntilRelease(orderId, amount) {
             
             if (status === 50 || status === 'Completed' || status === 'Finished' || status === 'Released') {
                 console.log(`[${new Date().toLocaleString()}] 🎉 Order ${orderId} completed! Coins released.`);
-                await sendChatMessage(orderId, "✅ Coins released!\n\n⭐ Please leave a good review! Your rating helps me serve you better.");
                 await sendTelegramCompletion(orderId);
                 monitoringTasks.delete(orderId);
                 processedOrders.delete(orderId);
@@ -474,13 +473,8 @@ async function processNewOrder(order) {
     // Get seller's rating and release time
     const { avgReleaseTime, sellerRating } = await getSellerInfo(orderId, sellerUid);
     
-    // Wait 5 seconds
     await new Promise(resolve => setTimeout(resolve, 5000));
-    
-    // Send initial chat to seller
     await sendChatMessage(orderId, "Hope you've read my terms before placing trade. Please reply 'agree' to confirm. Thanks 🙏.");
-    
-    // Wait 10 seconds
     await new Promise(resolve => setTimeout(resolve, 10000));
     
     const success = await markAsPaid(orderId);
@@ -527,7 +521,7 @@ async function checkPendingOrders() {
 // ============ STARTUP ============
 async function sendStartupMessage() {
     try {
-        await telegramBot.telegram.sendMessage(TELEGRAM_CHAT_ID, '🤖 *P2P Bot is Online!*\n\n✅ Auto-detects orders\n✅ Shows seller rating & release time\n✅ Auto-deletes messages after 15 mins\n✅ Copy button for account numbers', { parse_mode: 'Markdown' });
+        await telegramBot.telegram.sendMessage(TELEGRAM_CHAT_ID, '🤖 *P2P Bot is Online!*\n\n✅ Shows seller rating & release time\n✅ Auto-deletes messages after 15 mins', { parse_mode: 'Markdown' });
         console.log('📱 Telegram connected');
     } catch (error) {
         console.error('⚠️ Telegram connection failed:', error.message);
