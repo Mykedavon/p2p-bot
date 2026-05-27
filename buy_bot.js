@@ -22,6 +22,7 @@ const telegramBot = new Telegraf(TELEGRAM_TOKEN);
 // Track processed orders
 const processedOrders = new Set();
 const monitoringTasks = new Map();
+const failedOrders = new Set();
 
 // Per-order rate limit tracking
 const lastReminderTimeMap = new Map();
@@ -63,10 +64,13 @@ async function getSellerInfo(orderId, sellerUid) {
         });
         
         const result = response.result || {};
+        
         const avgReleaseTime = parseInt(result.averageReleaseTime) || 0;
         
         let rating = 'N/A';
-        if (result.goodAppraiseRate && result.goodAppraiseRate !== '0') {
+        if (result.favourableRate && result.favourableRate !== '0') {
+            rating = `${result.favourableRate}%`;
+        } else if (result.goodAppraiseRate && result.goodAppraiseRate !== '0') {
             rating = `${result.goodAppraiseRate}%`;
         } else if (result.recentRate) {
             rating = `${result.recentRate}%`;
@@ -133,7 +137,7 @@ async function withRetry(fn, maxRetries = 3, delay = 2000) {
     throw lastError;
 }
 
-// ============ GET SELLER'S SELECTED PAYMENT METHOD ============
+// ============ GET SELLER'S SELECTED PAYMENT METHOD (FIXED FOR TYPE 14) ============
 async function getSellersSelectedPaymentMethod(orderId) {
     return withRetry(async () => {
         const orderDetails = await client.getOrderDetails({ orderId: orderId });
@@ -153,14 +157,10 @@ async function getSellersSelectedPaymentMethod(orderId) {
         
         if (confirmedPayment && confirmedPayment.id) {
             selectedMethod = paymentTermList.find(method => method.id === confirmedPayment.id);
-            if (selectedMethod) {
-                console.log(`[DEBUG] Found payment method via confirmedPayTerm - paymentType: ${selectedMethod.paymentType}`);
-            }
         }
         
         if (!selectedMethod && paymentTermList.length > 0) {
             selectedMethod = paymentTermList[0];
-            console.log(`[DEBUG] Using first available payment method (paymentType: ${selectedMethod.paymentType})`);
         }
         
         if (!selectedMethod) {
@@ -168,11 +168,71 @@ async function getSellersSelectedPaymentMethod(orderId) {
             return null;
         }
         
+        // DEBUG: Log raw response to see where account number is stored
+        console.log(`[DEBUG] RAW selectedMethod:`, JSON.stringify(selectedMethod, null, 2));
+        
+        // Extract account number from multiple possible locations
+        let extractedAccountNo = "";
+        
+        // Level 1: Check root level fields
+        if (selectedMethod.accountNo && selectedMethod.accountNo !== "") {
+            extractedAccountNo = selectedMethod.accountNo;
+        }
+        // Level 2: Check cardNo or bankCardNo
+        else if (selectedMethod.cardNo && selectedMethod.cardNo !== "") {
+            extractedAccountNo = selectedMethod.cardNo;
+        }
+        else if (selectedMethod.bankCardNo && selectedMethod.bankCardNo !== "") {
+            extractedAccountNo = selectedMethod.bankCardNo;
+        }
+        // Level 3: Check paymentAttributes (JSON string)
+        else if (selectedMethod.paymentAttributes) {
+            try {
+                let attrs = selectedMethod.paymentAttributes;
+                if (typeof attrs === 'string') {
+                    attrs = JSON.parse(attrs);
+                }
+                extractedAccountNo = attrs.accountNo || attrs.cardNo || attrs.accountNumber || "";
+                if (extractedAccountNo) {
+                    console.log(`[DEBUG] Extracted account from paymentAttributes: ${extractedAccountNo}`);
+                }
+            } catch (e) {
+                console.log(`[DEBUG] Failed to parse paymentAttributes: ${e.message}`);
+            }
+        }
+        // Level 4: Check keyValues array/object
+        else if (selectedMethod.keyValues) {
+            try {
+                let kv = selectedMethod.keyValues;
+                if (Array.isArray(kv)) {
+                    for (const item of kv) {
+                        if (item.key === 'accountNo' || item.key === 'cardNo' || item.key === 'accountNumber') {
+                            extractedAccountNo = item.value;
+                            break;
+                        }
+                    }
+                } else if (typeof kv === 'object') {
+                    extractedAccountNo = kv.accountNo || kv.cardNo || kv.accountNumber || "";
+                }
+                if (extractedAccountNo) {
+                    console.log(`[DEBUG] Extracted account from keyValues: ${extractedAccountNo}`);
+                }
+            } catch (e) {
+                console.log(`[DEBUG] Failed to parse keyValues: ${e.message}`);
+            }
+        }
+        
+        if (!extractedAccountNo || extractedAccountNo.trim() === "") {
+            extractedAccountNo = "N/A";
+        }
+        
         console.log(`[DEBUG] FINAL SELECTED - paymentType: ${selectedMethod.paymentType}, bankName: ${selectedMethod.bankName || 'N/A'}`);
+        console.log(`[DEBUG] Extracted account number: "${extractedAccountNo}"`);
+        console.log(`[DEBUG] Account name: "${selectedMethod.realName || 'N/A'}"`);
         
         return {
             bankName: selectedMethod.bankName || "N/A",
-            accountNumber: selectedMethod.accountNo || "N/A",
+            accountNumber: extractedAccountNo,
             accountName: selectedMethod.realName || "N/A",
             paymentId: selectedMethod.id,
             paymentType: selectedMethod.paymentType
@@ -180,7 +240,7 @@ async function getSellersSelectedPaymentMethod(orderId) {
     }, 5, 3000);
 }
 
-// ============ TELEGRAM FUNCTIONS (ALL MESSAGES AUTO-DELETE AFTER 15 MINUTES) ============
+// ============ TELEGRAM FUNCTIONS ============
 async function sendTelegramMessage(message) {
     const sentMessage = await telegramBot.telegram.sendMessage(TELEGRAM_CHAT_ID, message, {
         parse_mode: 'Markdown'
@@ -202,10 +262,10 @@ async function sendTelegramPaymentInfo(orderId, amount, sellerBank, paymentType,
     const paymentMethodName = getPaymentMethodName(paymentType);
     const paymentLabel = getPaymentLabel(paymentType);
     
-    // Escape special characters in seller name and bank name
     const safeSellerName = escapeMarkdown(sellerName);
     const safeBankName = escapeMarkdown(sellerBank.bankName);
     const safeAccountName = escapeMarkdown(sellerBank.accountName);
+    const safeAccountNumber = escapeMarkdown(sellerBank.accountNumber);
     
     const ratingDisplay = (sellerRating && sellerRating !== 'N/A') ? `${sellerRating}⭐` : 'N/A';
     
@@ -219,24 +279,24 @@ async function sendTelegramPaymentInfo(orderId, amount, sellerBank, paymentType,
 
 *📌 Payment Method:* ${paymentMethodName}`;
 
-    if (sellerBank.bankName && sellerBank.bankName !== 'N/A' && sellerBank.bankName !== '') {
+    if (sellerBank.bankName && sellerBank.bankName !== 'N/A') {
         message += `\n*🏦 Bank Name:* ${safeBankName}`;
     }
 
-    if (sellerBank.accountNumber && sellerBank.accountNumber !== 'N/A' && sellerBank.accountNumber !== '') {
-        message += `\n*🔢 ${paymentLabel} Number:* \`${sellerBank.accountNumber}\``;
+    if (sellerBank.accountNumber && sellerBank.accountNumber !== 'N/A') {
+        message += `\n*🔢 ${paymentLabel} Number:* \`${safeAccountNumber}\``;
     } else {
         message += `\n*🔢 ${paymentLabel} Number:* \`Not available - check Bybit app\``;
     }
 
-    if (sellerBank.accountName && sellerBank.accountName !== 'N/A' && sellerBank.accountName !== '') {
+    if (sellerBank.accountName && sellerBank.accountName !== 'N/A') {
         message += `\n*👤 Account Name:* ${safeAccountName}`;
     }
 
     message += `\n\n⚠️ Send payment to the ${paymentLabel} account above.`;
 
     let copyButton = {};
-    if (sellerBank.accountNumber && sellerBank.accountNumber !== 'N/A' && sellerBank.accountNumber !== '') {
+    if (sellerBank.accountNumber && sellerBank.accountNumber !== 'N/A') {
         copyButton = {
             reply_markup: {
                 inline_keyboard: [
@@ -481,7 +541,7 @@ async function resumeMonitoringForActiveOrders() {
             monitorOrderUntilRelease(orderId, order.amount);
             processedOrders.add(orderId);
         } 
-        else if (order.status === 10 && !processedOrders.has(orderId)) {
+        else if (order.status === 10 && !processedOrders.has(orderId) && !failedOrders.has(orderId)) {
             console.log(`[${new Date().toLocaleString()}] 🔄 Order ${orderId} has status 10 - processing as new order`);
             await processNewOrder(order);
         }
@@ -494,6 +554,11 @@ async function processNewOrder(order) {
     const sellerUid = order.userId;
     const sellerName = order.targetNickName;
     const amount = order.amount;
+    
+    if (failedOrders.has(orderId)) {
+        console.log(`[${new Date().toLocaleString()}] ⏭️ Skipping already failed order ${orderId}`);
+        return;
+    }
     
     if (processedOrders.has(orderId) || monitoringTasks.has(orderId)) return;
     processedOrders.add(orderId);
@@ -517,18 +582,20 @@ async function processNewOrder(order) {
             (sellerBank.accountName && sellerBank.accountName !== 'N/A')
         );
         
-        if (hasPaymentInfo) {
+        if (hasPaymentInfo && sellerBank.accountNumber !== 'N/A') {
             await sendTelegramPaymentInfo(orderId, amount, sellerBank, sellerBank.paymentType, sellerName, sellerRating, avgReleaseTime);
             console.log(`[${new Date().toLocaleString()}] 📱 Payment details sent to Telegram for order ${orderId}`);
         } else {
             await sendFallbackMessage(orderId, amount, sellerName, sellerRating, avgReleaseTime);
             console.log(`[${new Date().toLocaleString()}] 📱 Fallback message sent for order ${orderId} (no payment details)`);
+            failedOrders.add(orderId);
         }
         
         monitorOrderUntilRelease(orderId, amount);
     } else {
         console.log(`[${new Date().toLocaleString()}] ❌ Failed to mark order ${orderId} as paid`);
         processedOrders.delete(orderId);
+        failedOrders.add(orderId);
     }
 }
 
@@ -537,7 +604,7 @@ async function checkPendingOrders() {
     try {
         const orders = await getActiveBuyOrders();
         for (const order of orders) {
-            if (!processedOrders.has(order.id) && !monitoringTasks.has(order.id)) {
+            if (!processedOrders.has(order.id) && !monitoringTasks.has(order.id) && !failedOrders.has(order.id)) {
                 await processNewOrder(order);
             }
         }
@@ -551,7 +618,7 @@ async function checkPendingOrders() {
 // ============ STARTUP ============
 async function sendStartupMessage() {
     try {
-        await telegramBot.telegram.sendMessage(TELEGRAM_CHAT_ID, '🤖 *P2P Bot is Online!*\n\n✅ Shows seller rating & release time\n✅ Auto-deletes messages after 15 mins', { parse_mode: 'Markdown' });
+        await telegramBot.telegram.sendMessage(TELEGRAM_CHAT_ID, '🤖 *P2P Bot is Online!*\n\n✅ Shows seller rating & release time\n✅ Auto-deletes messages after 15 mins\n✅ Copy button for account numbers', { parse_mode: 'Markdown' });
         console.log('📱 Telegram connected');
     } catch (error) {
         console.error('⚠️ Telegram connection failed:', error.message);
@@ -561,7 +628,8 @@ async function sendStartupMessage() {
 // ============ MAIN ============
 async function main() {
     console.log(`\n    ╔══════════════════════════════════════════════════╗
-    ║     Bybit P2P Bot - BUY BOT (WITH SELLER INFO)    ║
+    ║     Bybit P2P Bot - BUY BOT (FULLY CORRECTED)     ║
+    ║     With Seller Info & Payment Details            ║
     ╚══════════════════════════════════════════════════╝\n`);
     console.log('============================================================');
     console.log('🤖 BYBIT P2P AUTO TRADING BOT');
@@ -572,6 +640,7 @@ async function main() {
     console.log(`📊 Status 20: Already paid (waiting for release)`);
     console.log(`⭐ Shows seller rating & average release time`);
     console.log(`🗑️ All messages auto-delete after 15 minutes`);
+    console.log(`🔢 Copy button for account numbers`);
     console.log('------------------------------------------------------------');
     
     await sendStartupMessage();
