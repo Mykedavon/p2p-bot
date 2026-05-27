@@ -30,6 +30,30 @@ const MIN_REMINDER_INTERVAL = 5000;
 // Track reminder state for each order
 const reminderStateMap = new Map();
 
+// ============ ESCAPE MARKDOWN FUNCTION ============
+function escapeMarkdown(text) {
+    if (!text) return '';
+    return String(text)
+        .replace(/_/g, '\\_')
+        .replace(/\*/g, '\\*')
+        .replace(/\[/g, '\\[')
+        .replace(/\]/g, '\\]')
+        .replace(/\(/g, '\\(')
+        .replace(/\)/g, '\\)')
+        .replace(/~/g, '\\~')
+        .replace(/`/g, '\\`')
+        .replace(/>/g, '\\>')
+        .replace(/#/g, '\\#')
+        .replace(/\+/g, '\\+')
+        .replace(/-/g, '\\-')
+        .replace(/=/g, '\\=')
+        .replace(/\|/g, '\\|')
+        .replace(/\{/g, '\\{')
+        .replace(/\}/g, '\\}')
+        .replace(/\./g, '\\.')
+        .replace(/\!/g, '\\!');
+}
+
 // ============ GET SELLER INFO (RATING & RELEASE TIME) ============
 async function getSellerInfo(orderId, sellerUid) {
     try {
@@ -162,7 +186,6 @@ async function sendTelegramMessage(message) {
         parse_mode: 'Markdown'
     });
     
-    // Auto-delete after 15 minutes
     setTimeout(async () => {
         try {
             await telegramBot.telegram.deleteMessage(TELEGRAM_CHAT_ID, sentMessage.message_id);
@@ -179,20 +202,25 @@ async function sendTelegramPaymentInfo(orderId, amount, sellerBank, paymentType,
     const paymentMethodName = getPaymentMethodName(paymentType);
     const paymentLabel = getPaymentLabel(paymentType);
     
+    // Escape special characters in seller name and bank name
+    const safeSellerName = escapeMarkdown(sellerName);
+    const safeBankName = escapeMarkdown(sellerBank.bankName);
+    const safeAccountName = escapeMarkdown(sellerBank.accountName);
+    
     const ratingDisplay = (sellerRating && sellerRating !== 'N/A') ? `${sellerRating}⭐` : 'N/A';
     
     let message = `*💰 NEW ORDER - SEND PAYMENT TO SELLER*
 
 *Order ID:* \`${orderId}\`
 *Amount:* ${amount} USDT
-*Seller:* ${sellerName}
+*Seller:* ${safeSellerName}
 *Rating:* ${ratingDisplay}
 *Avg Release Time:* ${avgReleaseTime} minutes
 
 *📌 Payment Method:* ${paymentMethodName}`;
 
     if (sellerBank.bankName && sellerBank.bankName !== 'N/A' && sellerBank.bankName !== '') {
-        message += `\n*🏦 Bank Name:* ${sellerBank.bankName}`;
+        message += `\n*🏦 Bank Name:* ${safeBankName}`;
     }
 
     if (sellerBank.accountNumber && sellerBank.accountNumber !== 'N/A' && sellerBank.accountNumber !== '') {
@@ -202,7 +230,7 @@ async function sendTelegramPaymentInfo(orderId, amount, sellerBank, paymentType,
     }
 
     if (sellerBank.accountName && sellerBank.accountName !== 'N/A' && sellerBank.accountName !== '') {
-        message += `\n*👤 Account Name:* ${sellerBank.accountName}`;
+        message += `\n*👤 Account Name:* ${safeAccountName}`;
     }
 
     message += `\n\n⚠️ Send payment to the ${paymentLabel} account above.`;
@@ -227,6 +255,7 @@ async function sendTelegramPaymentInfo(orderId, amount, sellerBank, paymentType,
 }
 
 async function sendFallbackMessage(orderId, amount, sellerName, sellerRating, avgReleaseTime) {
+    const safeSellerName = escapeMarkdown(sellerName);
     const ratingDisplay = (sellerRating && sellerRating !== 'N/A') ? `${sellerRating}⭐` : 'N/A';
     
     const message = `
@@ -234,7 +263,7 @@ async function sendFallbackMessage(orderId, amount, sellerName, sellerRating, av
 
 *Order ID:* \`${orderId}\`
 *Amount:* ${amount} USDT
-*Seller:* ${sellerName}
+*Seller:* ${safeSellerName}
 *Rating:* ${ratingDisplay}
 *Avg Release Time:* ${avgReleaseTime} minutes
 
@@ -251,10 +280,11 @@ P2P → Orders → Pending → Order ID: ${orderId}
 }
 
 async function sendTelegramCompletion(orderId) {
+    const safeOrderId = escapeMarkdown(orderId);
     const message = `
 *✅ ORDER COMPLETED*
 
-Order ID: \`${orderId}\`
+Order ID: \`${safeOrderId}\`
 Status: Seller has released the coins!
 
 The transaction is complete. Check your wallet.
