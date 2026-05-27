@@ -240,7 +240,8 @@ async function sendTelegramPaymentInfo(orderId, amount, sellerBank, paymentType,
     const safeAccountName = escapeMarkdown(sellerBank.accountName);
     const safeAccountNo = escapeMarkdown(sellerBank.accountNumber);
     
-    const ratingDisplay = (sellerRating && sellerRating !== 'N/A') ? `${sellerRating}` : 'N/A';
+    // ✅ FIXED: Use sellerRating directly (it already contains %)
+    const ratingDisplay = (sellerRating && sellerRating !== 'N/A') ? sellerRating : 'N/A';
     
     let message = `*💰 NEW ORDER - SEND PAYMENT TO SELLER*\n\n` +
                   `*Order ID:* \`${orderId}\`\n` +
