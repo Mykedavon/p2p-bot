@@ -345,15 +345,14 @@ async function main() {
     }
 }
 
+// Graceful shutdown (NO telegramBot.stop() to prevent crash)
 process.once('SIGINT', () => {
     console.log('\n🛑 Bot shutting down...');
-    telegramBot.stop('SIGINT');
     process.exit(0);
 });
 
 process.once('SIGTERM', () => {
     console.log('\n🛑 Bot shutting down...');
-    telegramBot.stop('SIGTERM');
     process.exit(0);
 });
 
