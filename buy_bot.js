@@ -137,7 +137,7 @@ async function withRetry(fn, maxRetries = 3, delay = 2000) {
     throw lastError;
 }
 
-// ============ GET SELLER'S SELECTED PAYMENT METHOD (FIXED FOR TYPE 14) ============
+// ============ GET SELLER'S SELECTED PAYMENT METHOD (BULLETPROOF) ============
 async function getSellersSelectedPaymentMethod(orderId) {
     return withRetry(async () => {
         const orderDetails = await client.getOrderDetails({ orderId: orderId });
@@ -168,62 +168,105 @@ async function getSellersSelectedPaymentMethod(orderId) {
             return null;
         }
         
-        // DEBUG: Log raw response to see where account number is stored
+        // DEBUG: Log raw response
         console.log(`[DEBUG] RAW selectedMethod:`, JSON.stringify(selectedMethod, null, 2));
         
-        // Extract account number from multiple possible locations
+        // ============ BULLETPROOF ACCOUNT NUMBER EXTRACTION ============
         let extractedAccountNo = "";
         
-        // Level 1: Check root level fields
+        // Level 1: Try standard root fields
         if (selectedMethod.accountNo && selectedMethod.accountNo !== "") {
             extractedAccountNo = selectedMethod.accountNo;
         }
-        // Level 2: Check cardNo or bankCardNo
+        // Level 2: Try card fields
         else if (selectedMethod.cardNo && selectedMethod.cardNo !== "") {
             extractedAccountNo = selectedMethod.cardNo;
         }
         else if (selectedMethod.bankCardNo && selectedMethod.bankCardNo !== "") {
             extractedAccountNo = selectedMethod.bankCardNo;
         }
-        // Level 3: Check paymentAttributes (JSON string)
+        // Level 3: Try mobile field
+        else if (selectedMethod.mobile && selectedMethod.mobile !== "") {
+            extractedAccountNo = selectedMethod.mobile;
+        }
+        // Level 4: Try paymentExt fields (1-6) - Critical for Type 14
+        else if (selectedMethod.paymentExt1 && selectedMethod.paymentExt1 !== "") {
+            extractedAccountNo = selectedMethod.paymentExt1;
+            console.log(`[DEBUG] Extracted from paymentExt1: ${extractedAccountNo}`);
+        }
+        else if (selectedMethod.paymentExt2 && selectedMethod.paymentExt2 !== "") {
+            extractedAccountNo = selectedMethod.paymentExt2;
+            console.log(`[DEBUG] Extracted from paymentExt2: ${extractedAccountNo}`);
+        }
+        else if (selectedMethod.paymentExt3 && selectedMethod.paymentExt3 !== "") {
+            extractedAccountNo = selectedMethod.paymentExt3;
+            console.log(`[DEBUG] Extracted from paymentExt3: ${extractedAccountNo}`);
+        }
+        else if (selectedMethod.paymentExt4 && selectedMethod.paymentExt4 !== "") {
+            extractedAccountNo = selectedMethod.paymentExt4;
+            console.log(`[DEBUG] Extracted from paymentExt4: ${extractedAccountNo}`);
+        }
+        else if (selectedMethod.paymentExt5 && selectedMethod.paymentExt5 !== "") {
+            extractedAccountNo = selectedMethod.paymentExt5;
+            console.log(`[DEBUG] Extracted from paymentExt5: ${extractedAccountNo}`);
+        }
+        else if (selectedMethod.paymentExt6 && selectedMethod.paymentExt6 !== "") {
+            extractedAccountNo = selectedMethod.paymentExt6;
+            console.log(`[DEBUG] Extracted from paymentExt6: ${extractedAccountNo}`);
+        }
+        // Level 5: Try debitCardNumber
+        else if (selectedMethod.debitCardNumber && selectedMethod.debitCardNumber !== "") {
+            extractedAccountNo = selectedMethod.debitCardNumber;
+            console.log(`[DEBUG] Extracted from debitCardNumber: ${extractedAccountNo}`);
+        }
+        // Level 6: Try paymentAttributes (JSON string)
         else if (selectedMethod.paymentAttributes) {
             try {
                 let attrs = selectedMethod.paymentAttributes;
                 if (typeof attrs === 'string') {
                     attrs = JSON.parse(attrs);
                 }
-                extractedAccountNo = attrs.accountNo || attrs.cardNo || attrs.accountNumber || "";
+                extractedAccountNo = attrs.accountNo || attrs.cardNo || attrs.accountNumber || 
+                                     attrs.paymentExt1 || attrs.paymentExt2 || attrs.paymentExt3 || 
+                                     attrs.paymentExt4 || attrs.paymentExt5 || attrs.paymentExt6 || "";
                 if (extractedAccountNo) {
-                    console.log(`[DEBUG] Extracted account from paymentAttributes: ${extractedAccountNo}`);
+                    console.log(`[DEBUG] Extracted from paymentAttributes: ${extractedAccountNo}`);
                 }
             } catch (e) {
                 console.log(`[DEBUG] Failed to parse paymentAttributes: ${e.message}`);
             }
         }
-        // Level 4: Check keyValues array/object
+        // Level 7: Try keyValues array/object
         else if (selectedMethod.keyValues) {
             try {
                 let kv = selectedMethod.keyValues;
                 if (Array.isArray(kv)) {
                     for (const item of kv) {
-                        if (item.key === 'accountNo' || item.key === 'cardNo' || item.key === 'accountNumber') {
+                        if (item.key === 'accountNo' || item.key === 'cardNo' || item.key === 'accountNumber' ||
+                            item.key === 'paymentExt1' || item.key === 'paymentExt2' || item.key === 'paymentExt3' ||
+                            item.key === 'paymentExt4' || item.key === 'paymentExt5' || item.key === 'paymentExt6') {
                             extractedAccountNo = item.value;
                             break;
                         }
                     }
                 } else if (typeof kv === 'object') {
-                    extractedAccountNo = kv.accountNo || kv.cardNo || kv.accountNumber || "";
+                    extractedAccountNo = kv.accountNo || kv.cardNo || kv.accountNumber || 
+                                         kv.paymentExt1 || kv.paymentExt2 || kv.paymentExt3 ||
+                                         kv.paymentExt4 || kv.paymentExt5 || kv.paymentExt6 || "";
                 }
                 if (extractedAccountNo) {
-                    console.log(`[DEBUG] Extracted account from keyValues: ${extractedAccountNo}`);
+                    console.log(`[DEBUG] Extracted from keyValues: ${extractedAccountNo}`);
                 }
             } catch (e) {
                 console.log(`[DEBUG] Failed to parse keyValues: ${e.message}`);
             }
         }
         
-        if (!extractedAccountNo || extractedAccountNo.trim() === "") {
+        // Final fallback sanitation
+        if (!extractedAccountNo || String(extractedAccountNo).trim() === "") {
             extractedAccountNo = "N/A";
+        } else {
+            extractedAccountNo = String(extractedAccountNo).trim();
         }
         
         console.log(`[DEBUG] FINAL SELECTED - paymentType: ${selectedMethod.paymentType}, bankName: ${selectedMethod.bankName || 'N/A'}`);
@@ -295,6 +338,7 @@ async function sendTelegramPaymentInfo(orderId, amount, sellerBank, paymentType,
 
     message += `\n\n⚠️ Send payment to the ${paymentLabel} account above.`;
 
+    // Copy button for easy one-tap copy
     let copyButton = {};
     if (sellerBank.accountNumber && sellerBank.accountNumber !== 'N/A') {
         copyButton = {
@@ -628,8 +672,8 @@ async function sendStartupMessage() {
 // ============ MAIN ============
 async function main() {
     console.log(`\n    ╔══════════════════════════════════════════════════╗
-    ║     Bybit P2P Bot - BUY BOT (FULLY CORRECTED)     ║
-    ║     With Seller Info & Payment Details            ║
+    ║     Bybit P2P Bot - BUY BOT (BULLETPROOF)         ║
+    ║     With paymentExt1-6 Account Extraction         ║
     ╚══════════════════════════════════════════════════╝\n`);
     console.log('============================================================');
     console.log('🤖 BYBIT P2P AUTO TRADING BOT');
@@ -641,6 +685,7 @@ async function main() {
     console.log(`⭐ Shows seller rating & average release time`);
     console.log(`🗑️ All messages auto-delete after 15 minutes`);
     console.log(`🔢 Copy button for account numbers`);
+    console.log(`🔧 Extracts from: accountNo, cardNo, paymentExt1-6, mobile, debitCardNumber`);
     console.log('------------------------------------------------------------');
     
     await sendStartupMessage();
