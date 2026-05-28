@@ -243,16 +243,16 @@ async function sendTelegramPaymentInfo(orderId, amount, sellerBank, paymentType,
     // ✅ FIXED: Use sellerRating directly (it already contains %)
     const ratingDisplay = (sellerRating && sellerRating !== 'N/A') ? sellerRating : 'N/A';
     
-    let message = `*💰 NEW ORDER - SEND PAYMENT TO SELLER*\n\n` +
+    let message = `*💰 NEW ORDER - SEND PAYMENT TO SELLER*\n\n\n` +
                   `*Order ID:* \`${orderId}\`\n` +
-                  `*Amount:* \`${amount}\` USDT\n` +
+                  `*Amount:* \`${amount}\` NGN\n` +
                   `*Seller:* ${safeSellerName}\n` +
                   `*Rating:* ${ratingDisplay}\n` +
-                  `*Avg Release Time:* ${avgReleaseTime} mins\n\n` +
+                  `*Avg Release Time:* ${avgReleaseTime} mins\n\n\n` +
                   `*📌 Payment Method:* ${paymentMethodName}\n` +
                   `*🏦 Bank:* ${safeBankName}\n` +
                   `*👤 Account Name:* \`${safeAccountName}\`\n` +
-                  `*🔢 ${paymentLabel} Number:* \`${safeAccountNo}\`\n\n` +
+                  `*🔢 ${paymentLabel} Number:* \`${safeAccountNo}\`\n\n\n` +
                   `👉 Tap the number inside the backticks to copy.`;
 
     await sendTelegramMessage(message);
@@ -420,7 +420,7 @@ async function monitorOrderUntilRelease(orderId, amount) {
             
             if (status === 50 || status === 'Completed' || status === 'Finished' || status === 'Released') {
                 console.log(`[${new Date().toLocaleString()}] 🎉 Order ${orderId} completed! Coins released.`);
-                await sendChatMessage(orderId, "✅ Coins released!\n\n⭐ Please leave a good review! Your rating helps me serve you better.");
+                await sendChatMessage(orderId, "✅ Coins released!\n\n⭐ Thank you for trading with me.");
                 await sendTelegramCompletion(orderId);
                 monitoringTasks.delete(orderId);
                 processedOrders.delete(orderId);
